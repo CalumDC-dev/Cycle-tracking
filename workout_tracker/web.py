@@ -396,6 +396,10 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
   </div>
 </section>
 <section class="band">
+  <h2>Best Lap By Circuit</h2>
+  {best_laps_table(metrics["best_laps_by_circuit"])}
+</section>
+<section class="band">
   <h2>Daily Summary</h2>
   {daily_table(daily)}
 </section>
@@ -610,6 +614,22 @@ def daily_table(rows: list[dict[str, object]]) -> str:
                 fmt_num(row["average_rpm"], 1),
                 fmt_num(row["lap_distance"], 3),
                 fmt_num(row["total_distance"], 3),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def best_laps_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Circuit", "Best time", "Date", "Length", "Average speed"],
+        [
+            [
+                row["circuit_name"],
+                fmt_minutes(row["lap_time_minutes"]),
+                row["performed_on"],
+                fmt_num(row["length"], 3),
+                fmt_num(row["average_speed"], 2),
             ]
             for row in rows
         ],

@@ -294,10 +294,37 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
         "average_rpm": _average([day["average_rpm"] for day in summary if day["average_rpm"] is not None]),
         "best_lap_minutes": best_lap.lap_time_minutes if best_lap else None,
         "best_lap_circuit": best_lap.circuit_name if best_lap else None,
+        "best_laps_by_circuit": best_laps_by_circuit(laps),
         "mass_change": mass_change,
         "daily": summary,
         "mass": [dict(row) for row in mass_rows],
     }
+
+
+def best_laps_by_circuit(laps: list[CalculatedLap] | None = None, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    if laps is None:
+        if conn is None:
+            raise ValueError("Either laps or conn must be supplied.")
+        laps = calculated_laps(conn)
+
+    best: dict[str, CalculatedLap] = {}
+    for lap in laps:
+        if not lap.circuit_name or lap.lap_time_minutes is None:
+            continue
+        current = best.get(lap.circuit_name)
+        if current is None or lap.lap_time_minutes < current.lap_time_minutes:
+            best[lap.circuit_name] = lap
+
+    return [
+        {
+            "circuit_name": lap.circuit_name,
+            "performed_on": lap.performed_on,
+            "lap_time_minutes": lap.lap_time_minutes,
+            "length": lap.length,
+            "average_speed": lap.average_speed,
+        }
+        for lap in sorted(best.values(), key=lambda item: item.circuit_name or "")
+    ]
 
 
 def suggest_activity_classification(conn: sqlite3.Connection, raw_distance: float | None) -> dict[str, Any]:
@@ -340,4 +367,3 @@ def _average(values: list[float]) -> float | None:
     if not clean:
         return None
     return sum(clean) / len(clean)
-

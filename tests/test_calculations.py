@@ -2,6 +2,7 @@ import sqlite3
 import unittest
 
 from workout_tracker.calculations import (
+    best_laps_by_circuit,
     calculated_laps,
     calculated_sprints,
     daily_summary,
@@ -57,7 +58,36 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(metrics["lap_count"], 1)
         self.assertAlmostEqual(metrics["best_lap_minutes"], 3.0)
         self.assertEqual(metrics["best_lap_circuit"], "Test Circuit")
+        self.assertEqual(metrics["best_laps_by_circuit"][0]["circuit_name"], "Test Circuit")
         self.assertAlmostEqual(metrics["mass_change"], -1.0)
+
+    def test_best_laps_by_circuit_keeps_each_circuit_separate(self):
+        self.conn.execute(
+            """
+            INSERT INTO circuits (id, name, length, device_distance)
+            VALUES (2, 'Short Circuit', 0.5, 1.1111111111)
+            """
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO lap_entries (
+                performed_on, lap_index, circuit_id, lap_time_minutes,
+                hr, resistance, rpm
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("2026-05-02", 1, 1, 2.5, 130, 4, 112),
+                ("2026-05-02", 1, 2, 1.0, 130, 4, 112),
+            ],
+        )
+        self.conn.commit()
+
+        leaderboard = best_laps_by_circuit(conn=self.conn)
+
+        self.assertEqual([row["circuit_name"] for row in leaderboard], ["Short Circuit", "Test Circuit"])
+        self.assertAlmostEqual(leaderboard[0]["lap_time_minutes"], 1.0)
+        self.assertAlmostEqual(leaderboard[1]["lap_time_minutes"], 2.5)
 
     def test_classifier_suggests_lap_when_raw_distance_matches_circuit_target(self):
         suggestion = suggest_activity_classification(self.conn, 3.31)
@@ -126,4 +156,3 @@ class CalculationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
