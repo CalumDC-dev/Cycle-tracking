@@ -7,6 +7,8 @@ from workout_tracker.calculations import (
     calculated_sprints,
     daily_summary,
     dashboard_metrics,
+    device_distance_for_length,
+    estimated_watts_from_hr,
     suggest_activity_classification,
 )
 from workout_tracker.database import init_db
@@ -35,8 +37,18 @@ class CalculationTests(unittest.TestCase):
         lap = calculated_laps(self.conn)[0]
 
         self.assertEqual(lap.circuit_name, "Test Circuit")
+        self.assertAlmostEqual(lap.device_distance, 3.3333333333)
         self.assertAlmostEqual(lap.average_speed, 30.0)
         self.assertAlmostEqual(lap.calories_mets, 12.8)
+
+    def test_device_distance_for_length_uses_length_scale(self):
+        self.assertAlmostEqual(device_distance_for_length(1.5, 0.45), 3.3333333333)
+        self.assertIsNone(device_distance_for_length(1.5, 0))
+
+    def test_estimated_watts_from_hr_uses_met_and_mass(self):
+        watts = estimated_watts_from_hr(self.conn, 130, 80)
+
+        self.assertAlmostEqual(watts, 297.5288888889)
 
     def test_daily_summary_combines_sprint_and_lap_outputs(self):
         summary = daily_summary(self.conn)
