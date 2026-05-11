@@ -215,15 +215,20 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        conn = None
         try:
             if parsed.path == "/":
-                self._html("Dashboard", render_dashboard(self._conn()), "dashboard")
+                conn = self._conn()
+                self._html("Dashboard", render_dashboard(conn), "dashboard")
             elif parsed.path == "/entries":
-                self._html("Entries", render_entries(self._conn()), "entries")
+                conn = self._conn()
+                self._html("Entries", render_entries(conn), "entries")
             elif parsed.path == "/circuits":
-                self._html("Circuits", render_circuits(self._conn()), "circuits")
+                conn = self._conn()
+                self._html("Circuits", render_circuits(conn), "circuits")
             elif parsed.path == "/review":
-                self._html("Review", render_review(self._conn()), "review")
+                conn = self._conn()
+                self._html("Review", render_review(conn), "review")
             elif parsed.path.startswith("/export/"):
                 self._csv_export(parsed.path)
             elif parsed.path == "/health":
@@ -232,12 +237,16 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, explain=str(exc))
+        finally:
+            if conn is not None:
+                conn.close()
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         params = self._post_params()
-        conn = self._conn()
+        conn = None
         try:
+            conn = self._conn()
             if parsed.path == "/circuits/update":
                 update_circuit(conn, params)
                 self._redirect("/circuits")
@@ -250,10 +259,19 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/classify":
                 classify_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/entries/sprint/add":
+                add_sprint_entry(conn, params)
+                self._redirect("/entries")
+            elif parsed.path == "/entries/lap/add":
+                add_lap_entry(conn, params)
+                self._redirect("/entries")
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, explain=str(exc))
+        finally:
+            if conn is not None:
+                conn.close()
 
     def log_message(self, fmt: str, *args: object) -> None:
         return
@@ -293,27 +311,30 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
 
     def _csv_export(self, path: str) -> None:
         conn = self._conn()
-        routes = {
-            "/export/daily_summary.csv": daily_summary(conn),
-            "/export/sprints.csv": [sprint.__dict__ for sprint in calculated_sprints(conn)],
-            "/export/laps.csv": [lap.__dict__ for lap in calculated_laps(conn)],
-            "/export/circuits.csv": [dict(row) for row in conn.execute("SELECT * FROM circuits ORDER BY name").fetchall()],
-            "/export/raw_activities.csv": [
-                dict(row)
-                for row in conn.execute("SELECT * FROM raw_activities ORDER BY imported_at DESC, id DESC").fetchall()
-            ],
-        }
-        if path not in routes:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        encoded = csv_text(routes[path]).encode("utf-8")
-        filename = path.rsplit("/", 1)[-1]
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/csv; charset=utf-8")
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            routes = {
+                "/export/daily_summary.csv": daily_summary(conn),
+                "/export/sprints.csv": [sprint.__dict__ for sprint in calculated_sprints(conn)],
+                "/export/laps.csv": [lap.__dict__ for lap in calculated_laps(conn)],
+                "/export/circuits.csv": [dict(row) for row in conn.execute("SELECT * FROM circuits ORDER BY name").fetchall()],
+                "/export/raw_activities.csv": [
+                    dict(row)
+                    for row in conn.execute("SELECT * FROM raw_activities ORDER BY imported_at DESC, id DESC").fetchall()
+                ],
+            }
+            if path not in routes:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            encoded = csv_text(routes[path]).encode("utf-8")
+            filename = path.rsplit("/", 1)[-1]
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        finally:
+            conn.close()
 
 
 def page(title: str, body: str, active: str) -> str:
@@ -394,7 +415,38 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 def render_entries(conn: sqlite3.Connection) -> str:
     sprints = calculated_sprints(conn)
     laps = calculated_laps(conn)
+    circuits = conn.execute("SELECT id, name FROM circuits WHERE active = 1 ORDER BY name").fetchall()
     return f"""
+<section class="band">
+  <h2>Add Sprint Entry</h2>
+  <form class="stack" method="post" action="/entries/sprint/add">
+    <label>Date<input name="performed_on" type="date" required></label>
+    <label>Day number<input name="day_number" type="number" min="1"></label>
+    <label>Sprint number<input name="sprint_index" type="number" min="1"></label>
+    <label>Duration minutes<input name="duration_minutes" type="number" step="0.001" min="0"></label>
+    <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
+    <label>Device watts<input name="device_watts" type="number" step="0.1" min="0"></label>
+    <label>HR<input name="hr" type="number" min="0"></label>
+    <label>Resistance<input name="resistance" type="number" min="0"></label>
+    <label>Device distance<input name="device_distance" type="number" step="0.001" min="0"></label>
+    <label>Notes<input name="notes"></label>
+    <button type="submit">Add sprint</button>
+  </form>
+</section>
+<section class="band">
+  <h2>Add Lap Entry</h2>
+  <form class="stack" method="post" action="/entries/lap/add">
+    <label>Date<input name="performed_on" type="date" required></label>
+    <label>Lap number<input name="lap_index" type="number" min="1"></label>
+    <label>Circuit<select name="circuit_id" required>{circuit_select_options(circuits)}</select></label>
+    <label>Lap time minutes<input name="lap_time_minutes" type="number" step="0.001" min="0"></label>
+    <label>HR<input name="hr" type="number" min="0"></label>
+    <label>Resistance<input name="resistance" type="number" min="0"></label>
+    <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
+    <label>Notes<input name="notes"></label>
+    <button type="submit">Add lap</button>
+  </form>
+</section>
 <section class="band">
   <h2>Sprint Entries</h2>
   {table(
@@ -679,6 +731,67 @@ def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.commit()
 
 
+def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    performed_on = required(params, "performed_on")
+    conn.execute(
+        """
+        INSERT INTO sprint_entries (
+            performed_on, day_number, sprint_index, duration_minutes,
+            rpm, device_watts, hr, resistance, device_distance, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            performed_on,
+            maybe_int(params.get("day_number")),
+            maybe_int(params.get("sprint_index")),
+            maybe_float(params.get("duration_minutes")),
+            maybe_float(params.get("rpm")),
+            maybe_float(params.get("device_watts")),
+            maybe_int(params.get("hr")),
+            maybe_int(params.get("resistance")),
+            maybe_float(params.get("device_distance")),
+            empty_to_none(params.get("notes")),
+        ),
+    )
+    conn.commit()
+
+
+def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    performed_on = required(params, "performed_on")
+    circuit_id = maybe_int(params.get("circuit_id"))
+    if circuit_id is None:
+        raise ValueError("A circuit is required for lap entries.")
+    conn.execute(
+        """
+        INSERT INTO lap_entries (
+            performed_on, lap_index, circuit_id, lap_time_minutes,
+            hr, resistance, rpm, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            performed_on,
+            maybe_int(params.get("lap_index")),
+            circuit_id,
+            maybe_float(params.get("lap_time_minutes")),
+            maybe_int(params.get("hr")),
+            maybe_int(params.get("resistance")),
+            maybe_float(params.get("rpm")),
+            empty_to_none(params.get("notes")),
+        ),
+    )
+    conn.commit()
+
+
+def circuit_select_options(circuits: list[sqlite3.Row], selected_id: int | None = None) -> str:
+    options = ['<option value="">Select circuit</option>']
+    for circuit in circuits:
+        selected = " selected" if selected_id == circuit["id"] else ""
+        options.append(f'<option value="{circuit["id"]}"{selected}>{escape(circuit["name"])}</option>')
+    return "".join(options)
+
+
 def select_option(value: str, current: str) -> str:
     selected = " selected" if value == current else ""
     return f'<option value="{value}"{selected}>{value}</option>'
@@ -740,9 +853,15 @@ def maybe_int(value: str | None) -> int | None:
     return int(float(value))
 
 
+def required(params: dict[str, str], key: str) -> str:
+    value = empty_to_none(params.get(key))
+    if value is None:
+        raise ValueError(f"{key} is required.")
+    return value
+
+
 def empty_to_none(value: str | None) -> str | None:
     if value is None:
         return None
     cleaned = value.strip()
     return cleaned or None
-
