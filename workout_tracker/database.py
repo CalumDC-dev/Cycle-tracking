@@ -26,6 +26,20 @@ CREATE TABLE IF NOT EXISTS resistance_scaling (
     scaling REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS resistance_calibration_tests (
+    id INTEGER PRIMARY KEY,
+    tested_on TEXT NOT NULL,
+    resistance INTEGER NOT NULL,
+    duration_minutes REAL,
+    device_watts REAL NOT NULL,
+    expected_watts REAL NOT NULL,
+    hr INTEGER,
+    mass_kg REAL,
+    calculated_scaling REAL NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS met_lookup (
     id INTEGER PRIMARY KEY,
     hr_from INTEGER NOT NULL UNIQUE,
@@ -128,6 +142,7 @@ def reset_db(conn: sqlite3.Connection) -> None:
         "circuits",
         "mass_log",
         "met_lookup",
+        "resistance_calibration_tests",
         "resistance_scaling",
         "calibration_profiles",
     ]
@@ -136,4 +151,3 @@ def reset_db(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     conn.execute("PRAGMA foreign_keys = ON")
     init_db(conn)
-

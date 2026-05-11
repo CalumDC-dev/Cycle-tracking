@@ -14,6 +14,8 @@ from .calculations import (
     calculated_sprints,
     dashboard_metrics,
     daily_summary,
+    device_distance_for_length,
+    estimated_watts_from_hr,
     suggest_activity_classification,
 )
 from .database import connect, init_db
@@ -226,6 +228,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/circuits":
                 conn = self._conn()
                 self._html("Circuits", render_circuits(conn), "circuits")
+            elif parsed.path == "/calibration":
+                conn = self._conn()
+                self._html("Calibration", render_calibration(conn), "calibration")
             elif parsed.path == "/review":
                 conn = self._conn()
                 self._html("Review", render_review(conn), "review")
@@ -265,6 +270,24 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/entries/lap/add":
                 add_lap_entry(conn, params)
                 self._redirect("/entries")
+            elif parsed.path == "/calibration/profile/update":
+                update_calibration_profile(conn, params)
+                self._redirect("/calibration")
+            elif parsed.path == "/calibration/resistance/update":
+                update_resistance_scaling(conn, params)
+                self._redirect("/calibration")
+            elif parsed.path == "/calibration/test/preview":
+                preview = calculate_resistance_calibration_preview(conn, params)
+                self._html("Calibration", render_calibration(conn, preview), "calibration")
+            elif parsed.path == "/calibration/test/apply":
+                add_resistance_calibration_test(conn, params)
+                self._redirect("/calibration")
+            elif parsed.path == "/calibration/mass/add":
+                add_mass_log(conn, params)
+                self._redirect("/calibration")
+            elif parsed.path == "/calibration/mass/update":
+                update_mass_log(conn, params)
+                self._redirect("/calibration")
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -342,6 +365,7 @@ def page(title: str, body: str, active: str) -> str:
         ("dashboard", "/", "Dashboard"),
         ("entries", "/entries", "Entries"),
         ("circuits", "/circuits", "Circuits"),
+        ("calibration", "/calibration", "Calibration"),
         ("review", "/review", "Review"),
     ]
     links = "".join(
@@ -419,7 +443,7 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 def render_entries(conn: sqlite3.Connection) -> str:
     sprints = calculated_sprints(conn)
     laps = calculated_laps(conn)
-    circuits = conn.execute("SELECT id, name FROM circuits WHERE active = 1 ORDER BY name").fetchall()
+    circuits = circuit_rows_with_goals(conn)
     return f"""
 <section class="band">
   <h2>Add Sprint Entry</h2>
@@ -442,7 +466,8 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <form class="stack" method="post" action="/entries/lap/add">
     <label>Date<input name="performed_on" type="date" required></label>
     <label>Lap number<input name="lap_index" type="number" min="1"></label>
-    <label>Circuit<select name="circuit_id" required>{circuit_select_options(circuits)}</select></label>
+    <label>Circuit<select name="circuit_id" required id="lap-circuit">{circuit_select_options(circuits)}</select></label>
+    <label>Kinomap goal<input id="lap-goal" readonly></label>
     <label>Lap time minutes<input name="lap_time_minutes" type="number" step="0.001" min="0"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
     <label>Resistance<input name="resistance" type="number" min="0"></label>
@@ -450,6 +475,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
     <label>Notes<input name="notes"></label>
     <button type="submit">Add lap</button>
   </form>
+  {circuit_goal_script()}
 </section>
 <section class="band">
   <h2>Sprint Entries</h2>
@@ -497,7 +523,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
 
 
 def render_circuits(conn: sqlite3.Connection) -> str:
-    rows = conn.execute("SELECT * FROM circuits ORDER BY name").fetchall()
+    rows = circuit_rows_with_goals(conn, include_inactive=True)
     body = []
     for row in rows:
         checked = "checked" if row["active"] else ""
@@ -506,7 +532,7 @@ def render_circuits(conn: sqlite3.Connection) -> str:
   <input type="hidden" name="id" value="{row['id']}">
   <input name="name" value="{escape(str(row['name']))}" aria-label="Circuit name">
   <input name="length" value="{fmt_raw(row['length'])}" aria-label="Length">
-  <input name="device_distance" value="{fmt_raw(row['device_distance'])}" aria-label="Device distance">
+  <input value="{fmt_raw(row['calculated_device_distance'])}" aria-label="Kinomap goal" readonly>
   <label><span>Active</span><input type="checkbox" name="active" value="1" {checked}></label>
   <button type="submit">Save</button>
 </form>""")
@@ -516,14 +542,77 @@ def render_circuits(conn: sqlite3.Connection) -> str:
   <form class="stack" method="post" action="/circuits/add">
     <label>Circuit name<input name="name" required></label>
     <label>Real length<input name="length" type="number" step="0.001" required></label>
-    <label>Raw device distance<input name="device_distance" type="number" step="0.001"></label>
     <button type="submit">Add circuit</button>
   </form>
 </section>
 <section class="band">
   <h2>Circuits</h2>
-  <div class="muted">Length is the calibrated circuit length. Raw device distance is the target distance expected from Kinomap/Strava before calibration.</div>
+  <div class="muted">Kinomap goal is calculated from real circuit length divided by the active length scale.</div>
   <div style="display:grid; gap:8px; margin-top:12px;">{''.join(body)}</div>
+</section>
+"""
+
+
+def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | None = None) -> str:
+    profile = editable_calibration_profile(conn)
+    resistance_rows = resistance_scaling_rows(conn)
+    mass_rows = conn.execute("SELECT id, measured_on, mass_kg FROM mass_log ORDER BY measured_on DESC").fetchall()
+    tests = conn.execute(
+        """
+        SELECT *
+        FROM resistance_calibration_tests
+        ORDER BY tested_on DESC, id DESC
+        LIMIT 12
+        """
+    ).fetchall()
+    return f"""
+<section class="band">
+  <h2>Constants</h2>
+  <form class="stack" method="post" action="/calibration/profile/update">
+    <input type="hidden" name="id" value="{profile['id']}">
+    <label>Name<input name="name" value="{escape(str(profile['name']))}" required></label>
+    <label>Length scale<input name="length_scale" type="number" step="0.000001" min="0" value="{fmt_raw(profile['length_scale'])}" required></label>
+    <label>Distance per stroke<input name="distance_per_stroke" type="number" step="0.000001" min="0" value="{fmt_raw(profile['distance_per_stroke'])}"></label>
+    <button type="submit">Save constants</button>
+  </form>
+</section>
+<section class="band">
+  <h2>Resistance Scaling</h2>
+  <form method="post" action="/calibration/resistance/update">
+    <table>
+      <thead><tr><th>Resistance</th><th>Scaling factor</th></tr></thead>
+      <tbody>{''.join(resistance_factor_row(row) for row in resistance_rows)}</tbody>
+    </table>
+    <p><button type="submit">Save factors</button></p>
+  </form>
+</section>
+<section class="band">
+  <h2>Calibration Test</h2>
+  <form class="stack" method="post" action="/calibration/test/preview">
+    <label>Date<input name="tested_on" type="date" required></label>
+    <label>Resistance<select name="resistance" required>{resistance_select_options()}</select></label>
+    <label>Duration minutes<input name="duration_minutes" type="number" step="0.001" min="0"></label>
+    <label>Device watts<input name="device_watts" type="number" step="0.001" min="0" required></label>
+    <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
+    <label>Average HR<input name="hr" type="number" min="0"></label>
+    <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0"></label>
+    <label>Notes<input name="notes"></label>
+    <button type="submit">Preview factor</button>
+  </form>
+  {calibration_preview_panel(preview)}
+</section>
+<section class="band">
+  <h2>Mass Log</h2>
+  <form class="stack" method="post" action="/calibration/mass/add">
+    <label>Date<input name="measured_on" type="date" required></label>
+    <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" required></label>
+    <button type="submit">Add mass</button>
+  </form>
+  <div style="margin-top:14px;">{mass_log_table(mass_rows)}</div>
+</section>
+<section class="band">
+  <h2>Recent Calibration Tests</h2>
+  {calibration_tests_table(tests)}
 </section>
 """
 
@@ -598,6 +687,75 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row]) -> 
   <thead><tr><th>Source</th><th>Title</th><th>Date</th><th>Raw distance</th><th>Current classification</th><th>Review</th></tr></thead>
   <tbody>{''.join(rendered)}</tbody>
 </table>"""
+
+
+def resistance_factor_row(row: dict[str, object]) -> str:
+    resistance = int(row["resistance"])
+    scaling = row.get("scaling")
+    return f"""
+<tr>
+  <td>{resistance}</td>
+  <td><input name="scaling_{resistance}" type="number" step="0.000001" min="0" value="{fmt_raw(scaling)}"></td>
+</tr>"""
+
+
+def mass_log_table(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return '<div class="empty">No mass records yet.</div>'
+    rendered = []
+    for row in rows:
+        rendered.append(f"""
+<form method="post" action="/calibration/mass/update">
+  <input type="hidden" name="id" value="{row['id']}">
+  <table><tbody><tr>
+    <td><input name="measured_on" type="date" value="{escape(str(row['measured_on']))}" required></td>
+    <td><input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(row['mass_kg'])}" required></td>
+    <td><button type="submit">Save</button></td>
+  </tr></tbody></table>
+</form>""")
+    return "".join(rendered)
+
+
+def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
+    return table(
+        ["Date", "Resistance", "Device watts", "Expected watts", "HR", "Mass", "Scaling", "Notes"],
+        [
+            [
+                row["tested_on"],
+                row["resistance"],
+                fmt_num(row["device_watts"], 1),
+                fmt_num(row["expected_watts"], 1),
+                row["hr"],
+                fmt_num(row["mass_kg"], 2),
+                fmt_num(row["calculated_scaling"], 4),
+                row["notes"],
+            ]
+            for row in rows
+        ],
+    )
+
+
+def calibration_preview_panel(preview: dict[str, object] | None) -> str:
+    if preview is None:
+        return ""
+    current = preview.get("current_scaling")
+    change = preview.get("change_pct")
+    return f"""
+<div class="band" style="margin-top:14px;">
+  <h2>Preview Factor</h2>
+  <div class="metrics">
+    {metric("Resistance", preview["resistance"], "blue")}
+    {metric("Device watts", fmt_num(preview["device_watts"], 1), "amber")}
+    {metric("Expected watts", fmt_num(preview["expected_watts"], 1), "green")}
+    {metric("Calculated factor", fmt_num(preview["calculated_scaling"], 4), "green")}
+    {metric("Current factor", fmt_num(current, 4) if current is not None else "None", "blue")}
+    {metric("Change", signed_percent(change), "amber")}
+  </div>
+  <form method="post" action="/calibration/test/apply" style="margin-top:14px;">
+    {hidden_calibration_inputs(preview)}
+    <button type="submit">Apply factor</button>
+  </form>
+</div>"""
 
 
 def daily_table(rows: list[dict[str, object]]) -> str:
@@ -683,13 +841,12 @@ def update_circuit(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.execute(
         """
         UPDATE circuits
-        SET name = ?, length = ?, device_distance = ?, active = ?
+        SET name = ?, length = ?, active = ?
         WHERE id = ?
         """,
         (
             params["name"].strip(),
             float(params["length"]),
-            maybe_float(params.get("device_distance")),
             1 if params.get("active") == "1" else 0,
             int(params["id"]),
         ),
@@ -699,8 +856,8 @@ def update_circuit(conn: sqlite3.Connection, params: dict[str, str]) -> None:
 
 def add_circuit(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.execute(
-        "INSERT INTO circuits (name, length, device_distance) VALUES (?, ?, ?)",
-        (params["name"].strip(), float(params["length"]), maybe_float(params.get("device_distance"))),
+        "INSERT INTO circuits (name, length) VALUES (?, ?)",
+        (params["name"].strip(), float(params["length"])),
     )
     conn.commit()
 
@@ -804,12 +961,225 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.commit()
 
 
-def circuit_select_options(circuits: list[sqlite3.Row], selected_id: int | None = None) -> str:
+def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
+    profile = conn.execute(
+        "SELECT * FROM calibration_profiles WHERE active = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    if profile is None:
+        conn.execute(
+            """
+            INSERT INTO calibration_profiles (name, length_scale, distance_per_stroke, active)
+            VALUES ('Default under-desk bike', 0.45, NULL, 1)
+            """
+        )
+        conn.commit()
+        profile = conn.execute("SELECT * FROM calibration_profiles WHERE active = 1 ORDER BY id LIMIT 1").fetchone()
+    return profile
+
+
+def update_calibration_profile(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    profile_id = int(required(params, "id"))
+    conn.execute(
+        """
+        UPDATE calibration_profiles
+        SET name = ?, length_scale = ?, distance_per_stroke = ?, active = 1
+        WHERE id = ?
+        """,
+        (
+            required(params, "name"),
+            float(required(params, "length_scale")),
+            maybe_float(params.get("distance_per_stroke")),
+            profile_id,
+        ),
+    )
+    conn.commit()
+
+
+def resistance_scaling_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    existing = {
+        int(row["resistance"]): row["scaling"]
+        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+    }
+    return [{"resistance": resistance, "scaling": existing.get(resistance)} for resistance in range(1, 13)]
+
+
+def update_resistance_scaling(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    for resistance in range(1, 13):
+        scaling = maybe_float(params.get(f"scaling_{resistance}"))
+        if scaling is None:
+            continue
+        conn.execute(
+            """
+            INSERT INTO resistance_scaling (resistance, scaling)
+            VALUES (?, ?)
+            ON CONFLICT(resistance) DO UPDATE SET scaling = excluded.scaling
+            """,
+            (resistance, scaling),
+        )
+    conn.commit()
+
+
+def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, str]) -> dict[str, object]:
+    tested_on = required(params, "tested_on")
+    resistance = maybe_int(params.get("resistance"))
+    if resistance is None:
+        raise ValueError("Resistance is required.")
+    device_watts = maybe_float(params.get("device_watts"))
+    if device_watts is None or device_watts <= 0:
+        raise ValueError("Device watts must be greater than zero.")
+
+    mass_kg = maybe_float(params.get("mass_kg"))
+    hr = maybe_int(params.get("hr"))
+    expected_watts = maybe_float(params.get("expected_watts"))
+    if expected_watts is None:
+        expected_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+    if expected_watts is None or expected_watts <= 0:
+        raise ValueError("Expected watts, or HR and mass kg, are required.")
+
+    calculated_scaling = expected_watts / device_watts
+    current = conn.execute(
+        "SELECT scaling FROM resistance_scaling WHERE resistance = ?",
+        (resistance,),
+    ).fetchone()
+    current_scaling = float(current["scaling"]) if current else None
+    change_pct = None
+    if current_scaling:
+        change_pct = (calculated_scaling - current_scaling) / current_scaling
+
+    return {
+        "tested_on": tested_on,
+        "resistance": resistance,
+        "duration_minutes": maybe_float(params.get("duration_minutes")),
+        "device_watts": device_watts,
+        "expected_watts": expected_watts,
+        "hr": hr,
+        "mass_kg": mass_kg,
+        "calculated_scaling": calculated_scaling,
+        "current_scaling": current_scaling,
+        "change_pct": change_pct,
+        "notes": empty_to_none(params.get("notes")),
+    }
+
+
+def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    preview = calculate_resistance_calibration_preview(conn, params)
+    conn.execute(
+        """
+        INSERT INTO resistance_calibration_tests (
+            tested_on, resistance, duration_minutes, device_watts,
+            expected_watts, hr, mass_kg, calculated_scaling, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            preview["tested_on"],
+            preview["resistance"],
+            preview["duration_minutes"],
+            preview["device_watts"],
+            preview["expected_watts"],
+            preview["hr"],
+            preview["mass_kg"],
+            preview["calculated_scaling"],
+            preview["notes"],
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO resistance_scaling (resistance, scaling)
+        VALUES (?, ?)
+        ON CONFLICT(resistance) DO UPDATE SET scaling = excluded.scaling
+        """,
+        (preview["resistance"], preview["calculated_scaling"]),
+    )
+    conn.commit()
+
+
+def add_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    conn.execute(
+        """
+        INSERT INTO mass_log (measured_on, mass_kg)
+        VALUES (?, ?)
+        ON CONFLICT(measured_on) DO UPDATE SET mass_kg = excluded.mass_kg
+        """,
+        (required(params, "measured_on"), float(required(params, "mass_kg"))),
+    )
+    conn.commit()
+
+
+def update_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    conn.execute(
+        "UPDATE mass_log SET measured_on = ?, mass_kg = ? WHERE id = ?",
+        (required(params, "measured_on"), float(required(params, "mass_kg")), int(required(params, "id"))),
+    )
+    conn.commit()
+
+
+def circuit_rows_with_goals(conn: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, object]]:
+    profile = editable_calibration_profile(conn)
+    length_scale = float(profile["length_scale"])
+    where = "" if include_inactive else "WHERE active = 1"
+    rows = conn.execute(f"SELECT * FROM circuits {where} ORDER BY name").fetchall()
+    return [
+        {
+            **dict(row),
+            "calculated_device_distance": device_distance_for_length(row["length"], length_scale),
+        }
+        for row in rows
+    ]
+
+
+def circuit_select_options(circuits: list[dict[str, object]] | list[sqlite3.Row], selected_id: int | None = None) -> str:
     options = ['<option value="">Select circuit</option>']
     for circuit in circuits:
         selected = " selected" if selected_id == circuit["id"] else ""
-        options.append(f'<option value="{circuit["id"]}"{selected}>{escape(circuit["name"])}</option>')
+        goal = circuit.get("calculated_device_distance") if isinstance(circuit, dict) else None
+        data_goal = f' data-goal="{fmt_raw(goal)}"' if goal is not None else ""
+        options.append(f'<option value="{circuit["id"]}"{selected}{data_goal}>{escape(str(circuit["name"]))}</option>')
     return "".join(options)
+
+
+def circuit_goal_script() -> str:
+    return """
+<script>
+(() => {
+  const select = document.getElementById('lap-circuit');
+  const output = document.getElementById('lap-goal');
+  if (!select || !output) return;
+  const update = () => {
+    const option = select.options[select.selectedIndex];
+    output.value = option?.dataset?.goal || '';
+  };
+  select.addEventListener('change', update);
+  update();
+})();
+</script>"""
+
+
+def resistance_select_options(selected: int | None = None) -> str:
+    return "".join(
+        f'<option value="{resistance}"{" selected" if selected == resistance else ""}>{resistance}</option>'
+        for resistance in range(1, 13)
+    )
+
+
+def hidden_calibration_inputs(preview: dict[str, object]) -> str:
+    fields = [
+        "tested_on",
+        "resistance",
+        "duration_minutes",
+        "device_watts",
+        "expected_watts",
+        "hr",
+        "mass_kg",
+        "notes",
+    ]
+    inputs = []
+    for field in fields:
+        value = preview.get(field)
+        if value is None:
+            value = ""
+        inputs.append(f'<input type="hidden" name="{field}" value="{escape(str(value))}">')
+    return "".join(inputs)
 
 
 def select_option(value: str, current: str) -> str:
@@ -848,6 +1218,12 @@ def signed_num(value: object, digits: int = 1) -> str:
         return ""
     num = float(value)
     return f"{num:+,.{digits}f}"
+
+
+def signed_percent(value: object) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):+,.1%}"
 
 
 def fmt_minutes(value: object) -> str:
