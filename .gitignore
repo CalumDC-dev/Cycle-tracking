@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.backup-*.xlsx
+Workout tracking.xlsx
+data/
+exports/
