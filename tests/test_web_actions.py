@@ -23,7 +23,9 @@ from workout_tracker.web import (
     parse_post_params,
     populate_missing_duplicate_hr,
     render_entries,
+    render_maintenance,
     review_actions,
+    maintenance_items,
     promote_activity_form,
     promote_raw_activity,
     raw_activity_has_entry,
@@ -219,6 +221,42 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="lap_index"', html)
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
+
+    def test_maintenance_flags_missing_entry_fields_and_review_items(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "duration_minutes": "5",
+            },
+        )
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "needs-work",
+                "started_on": "2026-05-03T07:00",
+                "duration_seconds": "300",
+            },
+        )
+
+        items = maintenance_items(self.conn)
+        issues = {item["issue"] for item in items}
+        categories = {item["issue"]: item["category"] for item in items}
+        html = render_maintenance(self.conn)
+
+        self.assertIn("Missing HR", issues)
+        self.assertIn("Missing resistance", issues)
+        self.assertIn("Pending needs_hr", issues)
+        self.assertEqual(categories["Missing HR"], "Analysis blocker")
+        self.assertEqual(categories["Missing sprint number"], "Tidying")
+        self.assertEqual(categories["Missing device watts"], "Optional enrichment")
+        self.assertIn("Analysis blocker", html)
+        self.assertIn("Tidying", html)
+        self.assertIn("Optional enrichment", html)
+        self.assertIn("/entries#sprint-", html)
+        self.assertIn("/review", html)
+        self.assertIn("/export/backup.zip", html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)
