@@ -27,7 +27,7 @@ from .calculations import (
     suggest_activity_classification,
 )
 from .database import connect, init_db
-from .exporter import csv_text
+from .exporter import backup_bundle_bytes, backup_filename, csv_text
 
 
 CSS = """
@@ -294,6 +294,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/calibration":
                 conn = self._conn()
                 self._html("Calibration", render_calibration(conn), "calibration")
+            elif parsed.path == "/maintenance":
+                conn = self._conn()
+                self._html("Maintenance", render_maintenance(conn), "maintenance")
             elif parsed.path == "/review":
                 conn = self._conn()
                 self._html("Review", render_review(conn), "review")
@@ -412,6 +415,15 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
     def _csv_export(self, path: str) -> None:
         conn = self._conn()
         try:
+            if path == "/export/backup.zip":
+                encoded = backup_bundle_bytes(conn)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f'attachment; filename="{backup_filename()}"')
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
             routes = {
                 "/export/daily_summary.csv": daily_summary(conn),
                 "/export/sprints.csv": [sprint.__dict__ for sprint in calculated_sprints(conn)],
@@ -444,6 +456,7 @@ def page(title: str, body: str, active: str) -> str:
         ("entries", "/entries", "Entries"),
         ("circuits", "/circuits", "Circuits"),
         ("calibration", "/calibration", "Calibration"),
+        ("maintenance", "/maintenance", "Maintenance"),
         ("review", "/review", "Review"),
     ]
     links = "".join(
@@ -535,6 +548,7 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 <section class="band">
   <h2>Exports</h2>
   <div class="actions">
+    <a href="/export/backup.zip">Backup bundle ZIP</a>
     <a href="/export/daily_summary.csv">Daily summary CSV</a>
     <a href="/export/sprints.csv">Sprints CSV</a>
     <a href="/export/laps.csv">Laps CSV</a>
@@ -598,7 +612,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
 
 def render_sprint_entries_table(sprints: list[object]) -> str:
     forms: list[str] = []
-    rows: list[tuple[object, list[str]]] = []
+    rows: list[tuple[object, list[str], str]] = []
     for sprint in sprints:
         form_id = f"sprint-edit-{sprint.id}"
         forms.append(entry_form(form_id, "/entries/sprint/update", sprint.id))
@@ -641,6 +655,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
                     readonly_cell(fmt_num(sprint.calories_mets, 1)),
                     save_button(form_id),
                 ],
+                f"sprint-{sprint.id}",
             )
         )
     return "".join(forms) + grouped_html_table(
@@ -665,7 +680,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
 
 def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object]]) -> str:
     forms: list[str] = []
-    rows: list[tuple[object, list[str]]] = []
+    rows: list[tuple[object, list[str], str]] = []
     for lap in laps:
         form_id = f"lap-edit-{lap.id}"
         forms.append(entry_form(form_id, "/entries/lap/update", lap.id))
@@ -693,6 +708,7 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
                     readonly_cell(fmt_num(lap.calories_mets, 1)),
                     save_button(form_id),
                 ],
+                f"lap-{lap.id}",
             )
         )
     return "".join(forms) + grouped_html_table(
@@ -794,6 +810,176 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
   {calibration_tests_table(tests)}
 </section>
 """
+
+
+def render_maintenance(conn: sqlite3.Connection) -> str:
+    items = maintenance_items(conn)
+    review_count = sum(1 for item in items if item["area"] == "Review")
+    entry_count = len(items) - review_count
+    return f"""
+<section class="band">
+  <h2>Backup</h2>
+  <div class="actions">
+    <a href="/export/backup.zip">Download backup bundle</a>
+    <a href="/export/daily_summary.csv">Daily summary CSV</a>
+    <a href="/export/source_metrics.csv">Source metrics CSV</a>
+  </div>
+</section>
+<section class="band">
+  <h2>Data Quality</h2>
+  <div class="metrics">
+    {metric("Open issues", len(items), "amber" if items else "green")}
+    {metric("Entry fixes", entry_count, "blue")}
+    {metric("Review items", review_count, "red" if review_count else "green")}
+  </div>
+</section>
+<section class="band">
+  <h2>Maintenance Queue</h2>
+  {maintenance_table(items)}
+</section>
+"""
+
+
+def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for sprint in calculated_sprints(conn):
+        context = f"Sprint {sprint.sprint_index or sprint.id}"
+        action = f"/entries#sprint-{sprint.id}"
+        maybe_add_issue(
+            items, not sprint.started_at, "Sprint", sprint.performed_on, sprint.started_at, context,
+            "Missing start time", "Needed for reliable duplicate matching.", action,
+        )
+        maybe_add_issue(
+            items, sprint.sprint_index is None, "Sprint", sprint.performed_on, sprint.started_at, context,
+            "Missing sprint number", "Helps order multiple free-flow sessions on the same day.", action,
+        )
+        maybe_add_issue(
+            items, sprint.hr is None, "Sprint", sprint.performed_on, sprint.started_at, context,
+            "Missing HR", "Needed for the primary HR/MET calorie estimate.", action,
+        )
+        maybe_add_issue(
+            items, sprint.resistance is None, "Sprint", sprint.performed_on, sprint.started_at, context,
+            "Missing resistance", "Needed for estimated watts and resistance-scaled comparisons.", action,
+        )
+        maybe_add_issue(
+            items, sprint.duration_minutes is None, "Sprint", sprint.performed_on, sprint.started_at, context,
+            "Missing duration", "Needed for calories, pace, and session totals.", action,
+        )
+        maybe_add_issue(
+            items, sprint.device_watts is None, "Sprint", sprint.performed_on, sprint.started_at, context,
+            "Missing device watts", "Needed for estimated watts and watts-based comparisons.", action,
+        )
+        if sprint.hr is not None and sprint.duration_minutes is not None and sprint.calories_mets is None:
+            add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
+        if sprint.resistance is not None and sprint.device_watts is not None and sprint.estimated_watts is None:
+            add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Missing resistance factor", "Add a scaling factor for this resistance level.", f"/calibration")
+
+    for lap in calculated_laps(conn):
+        context = f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id}"
+        action = f"/entries#lap-{lap.id}"
+        maybe_add_issue(
+            items, not lap.started_at, "Lap", lap.performed_on, lap.started_at, context,
+            "Missing start time", "Needed for reliable duplicate matching.", action,
+        )
+        maybe_add_issue(
+            items, lap.lap_index is None, "Lap", lap.performed_on, lap.started_at, context,
+            "Missing lap number", "Helps order multiple circuit sessions on the same day.", action,
+        )
+        maybe_add_issue(
+            items, lap.circuit_id is None, "Lap", lap.performed_on, lap.started_at, context,
+            "Missing circuit", "Needed for lap distance, speed, and circuit leaderboards.", action,
+        )
+        maybe_add_issue(
+            items, lap.hr is None, "Lap", lap.performed_on, lap.started_at, context,
+            "Missing HR", "Needed for the primary HR/MET calorie estimate.", action,
+        )
+        maybe_add_issue(
+            items, lap.resistance is None, "Lap", lap.performed_on, lap.started_at, context,
+            "Missing resistance", "Needed for resistance-level analysis and future comparisons.", action,
+        )
+        maybe_add_issue(
+            items, lap.lap_time_minutes is None, "Lap", lap.performed_on, lap.started_at, context,
+            "Missing lap time", "Needed for calories, speed, and best-lap tracking.", action,
+        )
+        if lap.hr is not None and lap.lap_time_minutes is not None and lap.calories_mets is None:
+            add_entry_issue(items, "Lap", lap.performed_on, lap.started_at, context, "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
+
+    review_rows = conn.execute(
+        """
+        SELECT id, source, source_activity_id, title, started_on, review_status, session_type
+        FROM raw_activities
+        WHERE review_status NOT IN ('already_logged', 'reviewed', 'imported', 'ignored')
+        ORDER BY COALESCE(started_on, imported_at), id
+        """
+    ).fetchall()
+    for row in review_rows:
+        context = row["title"] or row["source_activity_id"] or f"Raw activity {row['id']}"
+        add_entry_issue(
+            items,
+            "Review",
+            date_part(row["started_on"]) or "",
+            row["started_on"],
+            context,
+            f"Pending {row['review_status']}",
+            f"Classified as {row['session_type']}; review before importing or ignoring.",
+            "/review",
+        )
+
+    return sorted(items, key=lambda item: (str(item["date"] or ""), str(item["start"] or ""), str(item["area"]), str(item["issue"])))
+
+
+def maybe_add_issue(
+    items: list[dict[str, object]],
+    condition: bool,
+    area: str,
+    date: str | None,
+    start: str | None,
+    record: str,
+    issue: str,
+    detail: str,
+    action: str,
+) -> None:
+    if condition:
+        add_entry_issue(items, area, date, start, record, issue, detail, action)
+
+
+def add_entry_issue(
+    items: list[dict[str, object]],
+    area: str,
+    date: str | None,
+    start: str | None,
+    record: str,
+    issue: str,
+    detail: str,
+    action: str,
+) -> None:
+    items.append({
+        "area": area,
+        "date": date or "",
+        "start": fmt_start_time(start),
+        "record": record,
+        "issue": issue,
+        "detail": detail,
+        "action": action,
+    })
+
+
+def maintenance_table(items: list[dict[str, object]]) -> str:
+    if not items:
+        return '<div class="empty">No maintenance issues found.</div>'
+    rows = []
+    for item in items:
+        action = escape(str(item["action"]))
+        rows.append([
+            escape(str(item["date"])),
+            escape(str(item["start"])),
+            escape(str(item["area"])),
+            escape(str(item["record"])),
+            escape(str(item["issue"])),
+            escape(str(item["detail"])),
+            f'<a href="{action}">Open</a>',
+        ])
+    return html_table(["Date", "Start", "Area", "Record", "Issue", "Detail", ""], rows)
 
 
 def render_review(conn: sqlite3.Connection) -> str:
@@ -1189,6 +1375,14 @@ def table(headers: list[str], rows: list[list[object]]) -> str:
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def html_table(headers: list[str], rows: list[list[str]]) -> str:
+    if not rows:
+        return '<div class="empty">No data yet.</div>'
+    head = "".join(f"<th>{escape(header)}</th>" for header in headers)
+    body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+
+
 def grouped_table(headers: list[str], rows: list[list[object]], group_index: int = 0) -> str:
     if not rows:
         return '<div class="empty">No data yet.</div>'
@@ -1207,20 +1401,21 @@ def grouped_table(headers: list[str], rows: list[list[object]], group_index: int
     return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
-def grouped_html_table(headers: list[str], rows: list[tuple[object, list[str]]]) -> str:
+def grouped_html_table(headers: list[str], rows: list[tuple[object, list[str], str | None]]) -> str:
     if not rows:
         return '<div class="empty">No data yet.</div>'
     head = "".join(f"<th>{escape(header)}</th>" for header in headers)
     body = []
     current_group = object()
     group_class = "day-group-b"
-    for group_key, cells in rows:
+    for group_key, cells, row_id in rows:
         is_new_group = group_key != current_group
         if is_new_group:
             current_group = group_key
             group_class = "day-group-a" if group_class == "day-group-b" else "day-group-b"
         classes = f'{group_class}{" day-start" if is_new_group else ""}'
-        body.append(f'<tr class="{classes}">' + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
+        id_attr = f' id="{escape(row_id)}"' if row_id else ""
+        body.append(f'<tr{id_attr} class="{classes}">' + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
     return f'<div class="table-scroll"><table class="entry-table"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
 
