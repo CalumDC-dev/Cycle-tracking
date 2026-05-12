@@ -208,6 +208,36 @@ button.secondary {
 .table-scroll table {
   min-width: 980px;
 }
+.entry-table {
+  min-width: 1220px;
+}
+.entry-table input,
+.entry-table select {
+  width: 100%;
+  min-width: 72px;
+  min-height: 34px;
+  padding: 6px 7px;
+}
+.entry-table input[type="date"] {
+  min-width: 132px;
+}
+.entry-table input[type="datetime-local"] {
+  min-width: 168px;
+}
+.entry-table .narrow {
+  min-width: 62px;
+}
+.entry-table .readonly-cell {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.entry-table .actions-cell {
+  min-width: 76px;
+}
+.entry-table button {
+  min-height: 34px;
+  padding: 6px 10px;
+}
 .empty {
   color: var(--muted);
   padding: 18px;
@@ -309,8 +339,14 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/entries/sprint/add":
                 add_sprint_entry(conn, params)
                 self._redirect("/entries")
+            elif parsed.path == "/entries/sprint/update":
+                update_sprint_entry(conn, params)
+                self._redirect("/entries")
             elif parsed.path == "/entries/lap/add":
                 add_lap_entry(conn, params)
+                self._redirect("/entries")
+            elif parsed.path == "/entries/lap/update":
+                update_lap_entry(conn, params)
                 self._redirect("/entries")
             elif parsed.path == "/calibration/profile/update":
                 update_calibration_profile(conn, params)
@@ -526,7 +562,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
     <label>Device watts<input name="device_watts" type="number" step="0.1" min="0"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
-    <label>Resistance<input name="resistance" type="number" min="0"></label>
+    <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>Device distance<input name="device_distance" type="number" step="0.001" min="0"></label>
     <label>Notes<input name="notes"></label>
     <button type="submit">Add sprint</button>
@@ -542,7 +578,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
     <label>Kinomap goal<input id="lap-goal" readonly></label>
     <label>Lap time minutes<input name="lap_time_minutes" type="number" step="0.001" min="0"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
-    <label>Resistance<input name="resistance" type="number" min="0"></label>
+    <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
     <label>Notes<input name="notes"></label>
     <button type="submit">Add lap</button>
@@ -551,49 +587,118 @@ def render_entries(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Sprint Entries</h2>
-  {grouped_table(
-        ["Date", "Start", "Sprint", "Time", "RPM", "Device watts", "Estimated watts", "HR", "Resistance", "Cal distance", "Calories"],
-        [
-            [
-                sprint.performed_on,
-                fmt_start_time(sprint.started_at),
-                sprint.sprint_index,
-                fmt_minutes(sprint.duration_minutes),
-                fmt_num(sprint.rpm, 0),
-                fmt_num(sprint.device_watts, 0),
-                fmt_num(sprint.estimated_watts, 1),
-                sprint.hr,
-                sprint.resistance,
-                fmt_num(sprint.calibrated_distance, 2),
-                fmt_num(sprint.calories_watts, 1),
-            ]
-            for sprint in sprints
-        ],
-    )}
+  {render_sprint_entries_table(sprints)}
 </section>
 <section class="band">
   <h2>Lap Entries</h2>
-  {grouped_table(
-        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories"],
-        [
-            [
-                lap.performed_on,
-                fmt_start_time(lap.started_at),
-                lap.lap_index,
-                lap.circuit_name,
-                fmt_minutes(lap.lap_time_minutes),
-                fmt_num(lap.length, 3),
-                fmt_num(lap.average_speed, 2),
-                lap.hr,
-                lap.resistance,
-                fmt_num(lap.rpm, 0),
-                fmt_num(lap.calories_mets, 1),
-            ]
-            for lap in laps
-        ],
-    )}
+  {render_lap_entries_table(laps, circuits)}
 </section>
 """
+
+
+def render_sprint_entries_table(sprints: list[object]) -> str:
+    forms: list[str] = []
+    rows: list[tuple[object, list[str]]] = []
+    for sprint in sprints:
+        form_id = f"sprint-edit-{sprint.id}"
+        forms.append(entry_form(form_id, "/entries/sprint/update", sprint.id))
+        rows.append(
+            (
+                sprint.performed_on,
+                [
+                    entry_input(form_id, "performed_on", sprint.performed_on, input_type="date", required=True),
+                    entry_input(form_id, "started_at", datetime_local_value(sprint.started_at), input_type="datetime-local"),
+                    entry_input(form_id, "sprint_index", fmt_raw(sprint.sprint_index), input_type="number", min_value="1", css_class="narrow"),
+                    entry_input(
+                        form_id,
+                        "duration_minutes",
+                        step_value(sprint.duration_minutes, 3),
+                        input_type="number",
+                        step="0.001",
+                        min_value="0",
+                    ),
+                    entry_input(form_id, "rpm", fmt_raw(sprint.rpm), input_type="number", step="0.1", min_value="0"),
+                    entry_input(
+                        form_id,
+                        "device_watts",
+                        fmt_raw(sprint.device_watts),
+                        input_type="number",
+                        step="0.1",
+                        min_value="0",
+                    ),
+                    readonly_cell(fmt_num(sprint.estimated_watts, 1)),
+                    entry_input(form_id, "hr", fmt_raw(sprint.hr), input_type="number", min_value="0", css_class="narrow"),
+                    entry_select(form_id, "resistance", resistance_select_options(entry_resistance_value(sprint.resistance))),
+                    entry_input(
+                        form_id,
+                        "device_distance",
+                        fmt_raw(sprint.device_distance),
+                        input_type="number",
+                        step="0.001",
+                        min_value="0",
+                    ),
+                    readonly_cell(fmt_num(sprint.calibrated_distance, 2)),
+                    readonly_cell(fmt_num(sprint.calories_watts, 1)),
+                    save_button(form_id),
+                ],
+            )
+        )
+    return "".join(forms) + grouped_html_table(
+        [
+            "Date",
+            "Start",
+            "Sprint",
+            "Time",
+            "RPM",
+            "Device watts",
+            "Estimated watts",
+            "HR",
+            "Resistance",
+            "Device distance",
+            "Cal distance",
+            "Calories",
+            "",
+        ],
+        rows,
+    )
+
+
+def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object]]) -> str:
+    forms: list[str] = []
+    rows: list[tuple[object, list[str]]] = []
+    for lap in laps:
+        form_id = f"lap-edit-{lap.id}"
+        forms.append(entry_form(form_id, "/entries/lap/update", lap.id))
+        rows.append(
+            (
+                lap.performed_on,
+                [
+                    entry_input(form_id, "performed_on", lap.performed_on, input_type="date", required=True),
+                    entry_input(form_id, "started_at", datetime_local_value(lap.started_at), input_type="datetime-local"),
+                    entry_input(form_id, "lap_index", fmt_raw(lap.lap_index), input_type="number", min_value="1", css_class="narrow"),
+                    entry_select(form_id, "circuit_id", circuit_select_options(circuits, lap.circuit_id), required=True),
+                    entry_input(
+                        form_id,
+                        "lap_time_minutes",
+                        step_value(lap.lap_time_minutes, 3),
+                        input_type="number",
+                        step="0.001",
+                        min_value="0",
+                    ),
+                    readonly_cell(fmt_num(lap.length, 3)),
+                    readonly_cell(fmt_num(lap.average_speed, 2)),
+                    entry_input(form_id, "hr", fmt_raw(lap.hr), input_type="number", min_value="0", css_class="narrow"),
+                    entry_select(form_id, "resistance", resistance_select_options(entry_resistance_value(lap.resistance))),
+                    entry_input(form_id, "rpm", fmt_raw(lap.rpm), input_type="number", step="0.1", min_value="0"),
+                    readonly_cell(fmt_num(lap.calories_mets, 1)),
+                    save_button(form_id),
+                ],
+            )
+        )
+    return "".join(forms) + grouped_html_table(
+        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories", ""],
+        rows,
+    )
 
 
 def render_circuits(conn: sqlite3.Connection) -> str:
@@ -1100,6 +1205,74 @@ def grouped_table(headers: list[str], rows: list[list[object]], group_index: int
         cells = "".join(f"<td>{escape('' if value is None else str(value))}</td>" for value in row)
         body.append(f'<tr class="{classes}">{cells}</tr>')
     return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def grouped_html_table(headers: list[str], rows: list[tuple[object, list[str]]]) -> str:
+    if not rows:
+        return '<div class="empty">No data yet.</div>'
+    head = "".join(f"<th>{escape(header)}</th>" for header in headers)
+    body = []
+    current_group = object()
+    group_class = "day-group-b"
+    for group_key, cells in rows:
+        is_new_group = group_key != current_group
+        if is_new_group:
+            current_group = group_key
+            group_class = "day-group-a" if group_class == "day-group-b" else "day-group-b"
+        classes = f'{group_class}{" day-start" if is_new_group else ""}'
+        body.append(f'<tr class="{classes}">' + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
+    return f'<div class="table-scroll"><table class="entry-table"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+
+
+def entry_form(form_id: str, action: str, entry_id: int) -> str:
+    return (
+        f'<form id="{escape(form_id)}" method="post" action="{escape(action)}">'
+        f'<input type="hidden" name="id" value="{entry_id}"></form>'
+    )
+
+
+def entry_input(
+    form_id: str,
+    name: str,
+    value: object,
+    *,
+    input_type: str = "text",
+    step: str | None = None,
+    min_value: str | None = None,
+    max_value: str | None = None,
+    required: bool = False,
+    css_class: str = "",
+) -> str:
+    attrs = [
+        f'form="{escape(form_id)}"',
+        f'name="{escape(name)}"',
+        f'type="{escape(input_type)}"',
+        f'value="{escape("" if value is None else str(value))}"',
+    ]
+    if step is not None:
+        attrs.append(f'step="{escape(step)}"')
+    if min_value is not None:
+        attrs.append(f'min="{escape(min_value)}"')
+    if max_value is not None:
+        attrs.append(f'max="{escape(max_value)}"')
+    if required:
+        attrs.append("required")
+    if css_class:
+        attrs.append(f'class="{escape(css_class)}"')
+    return f"<input {' '.join(attrs)}>"
+
+
+def entry_select(form_id: str, name: str, options: str, required: bool = True) -> str:
+    required_attr = " required" if required else ""
+    return f'<select form="{escape(form_id)}" name="{escape(name)}"{required_attr}>{options}</select>'
+
+
+def readonly_cell(value: object) -> str:
+    return f'<span class="readonly-cell">{escape("" if value is None else str(value))}</span>'
+
+
+def save_button(form_id: str) -> str:
+    return f'<button class="secondary" form="{escape(form_id)}" type="submit">Save</button>'
 
 
 def metric(label: str, value: object, tone: str = "blue") -> str:
@@ -1768,6 +1941,7 @@ def promotion_device_watts(params: dict[str, str], payload: dict[str, object]) -
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
     started_at = normalize_datetime(empty_to_none(params.get("started_at")))
+    resistance = validated_resistance(params.get("resistance"))
     conn.execute(
         """
         INSERT INTO sprint_entries (
@@ -1785,9 +1959,41 @@ def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             maybe_float(params.get("rpm")),
             maybe_float(params.get("device_watts")),
             maybe_int(params.get("hr")),
-            maybe_int(params.get("resistance")),
+            resistance,
             maybe_float(params.get("device_distance")),
             empty_to_none(params.get("notes")),
+        ),
+    )
+    conn.commit()
+
+
+def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    entry_id = int(required(params, "id"))
+    conn.execute(
+        """
+        UPDATE sprint_entries
+        SET performed_on = ?,
+            started_at = ?,
+            sprint_index = ?,
+            duration_minutes = ?,
+            rpm = ?,
+            device_watts = ?,
+            hr = ?,
+            resistance = ?,
+            device_distance = ?
+        WHERE id = ?
+        """,
+        (
+            required(params, "performed_on"),
+            normalize_datetime(empty_to_none(params.get("started_at"))),
+            maybe_int(params.get("sprint_index")),
+            maybe_float(params.get("duration_minutes")),
+            maybe_float(params.get("rpm")),
+            maybe_float(params.get("device_watts")),
+            maybe_int(params.get("hr")),
+            validated_resistance(params.get("resistance")),
+            maybe_float(params.get("device_distance")),
+            entry_id,
         ),
     )
     conn.commit()
@@ -1799,6 +2005,7 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     circuit_id = maybe_int(params.get("circuit_id"))
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
+    resistance = validated_resistance(params.get("resistance"))
     conn.execute(
         """
         INSERT INTO lap_entries (
@@ -1814,12 +2021,52 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             circuit_id,
             maybe_float(params.get("lap_time_minutes")),
             maybe_int(params.get("hr")),
-            maybe_int(params.get("resistance")),
+            resistance,
             maybe_float(params.get("rpm")),
             empty_to_none(params.get("notes")),
         ),
     )
     conn.commit()
+
+
+def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    entry_id = int(required(params, "id"))
+    circuit_id = maybe_int(params.get("circuit_id"))
+    if circuit_id is None:
+        raise ValueError("A circuit is required for lap entries.")
+    conn.execute(
+        """
+        UPDATE lap_entries
+        SET performed_on = ?,
+            started_at = ?,
+            lap_index = ?,
+            circuit_id = ?,
+            lap_time_minutes = ?,
+            hr = ?,
+            resistance = ?,
+            rpm = ?
+        WHERE id = ?
+        """,
+        (
+            required(params, "performed_on"),
+            normalize_datetime(empty_to_none(params.get("started_at"))),
+            maybe_int(params.get("lap_index")),
+            circuit_id,
+            maybe_float(params.get("lap_time_minutes")),
+            maybe_int(params.get("hr")),
+            validated_resistance(params.get("resistance")),
+            maybe_float(params.get("rpm")),
+            entry_id,
+        ),
+    )
+    conn.commit()
+
+
+def validated_resistance(value: str | None) -> int | None:
+    resistance = maybe_int(value)
+    if resistance is not None and not 1 <= resistance <= 12:
+        raise ValueError("Resistance must be between 1 and 12.")
+    return resistance
 
 
 def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
@@ -2121,6 +2368,22 @@ def fmt_start_time(value: object) -> str:
     if parsed is not None and has_time_component(text):
         return parsed.strftime("%H:%M")
     return text
+
+
+def datetime_local_value(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    parsed = parse_datetime(text)
+    if parsed is not None and has_time_component(text):
+        return parsed.strftime("%Y-%m-%dT%H:%M")
+    return normalize_datetime(text) or ""
+
+
+def entry_resistance_value(value: object) -> int:
+    if value in (None, ""):
+        return 4
+    return int(float(value))
 
 
 def normalize_datetime(value: str | None) -> str | None:

@@ -22,6 +22,7 @@ from workout_tracker.web import (
     import_activity_file_to_review,
     parse_post_params,
     populate_missing_duplicate_hr,
+    render_entries,
     review_actions,
     promote_activity_form,
     promote_raw_activity,
@@ -29,7 +30,9 @@ from workout_tracker.web import (
     classify_activity,
     update_circuit,
     update_calibration_profile,
+    update_lap_entry,
     update_mass_log,
+    update_sprint_entry,
     update_resistance_scaling,
     UploadedFile,
 )
@@ -122,6 +125,99 @@ class WebActionTests(unittest.TestCase):
                     "lap_time_minutes": "4",
                 },
             )
+
+    def test_update_sprint_entry_fills_missing_start_index_and_resistance(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "duration_minutes": "5",
+                "device_watts": "250",
+                "hr": "120",
+                "device_distance": "8",
+            },
+        )
+        entry_id = self.conn.execute("SELECT id FROM sprint_entries").fetchone()["id"]
+
+        update_sprint_entry(
+            self.conn,
+            {
+                "id": str(entry_id),
+                "performed_on": "2026-05-02",
+                "started_at": "2026-05-02T07:30",
+                "sprint_index": "3",
+                "duration_minutes": "5",
+                "rpm": "131.5",
+                "device_watts": "250",
+                "hr": "120",
+                "resistance": "4",
+                "device_distance": "8",
+            },
+        )
+
+        sprint = calculated_sprints(self.conn)[0]
+        self.assertEqual(sprint.started_at, "2026-05-02T07:30")
+        self.assertEqual(sprint.sprint_index, 3)
+        self.assertEqual(sprint.resistance, 4)
+        self.assertAlmostEqual(sprint.calories_watts, 15.0)
+
+    def test_update_lap_entry_fills_missing_start_index_and_resistance(self):
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+                "hr": "115",
+            },
+        )
+        entry_id = self.conn.execute("SELECT id FROM lap_entries").fetchone()["id"]
+
+        update_lap_entry(
+            self.conn,
+            {
+                "id": str(entry_id),
+                "performed_on": "2026-05-02",
+                "started_at": "2026-05-02T07:45",
+                "lap_index": "2",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+                "hr": "115",
+                "resistance": "4",
+                "rpm": "100",
+            },
+        )
+
+        lap = calculated_laps(self.conn)[0]
+        self.assertEqual(lap.started_at, "2026-05-02T07:45")
+        self.assertEqual(lap.lap_index, 2)
+        self.assertEqual(lap.resistance, 4)
+
+    def test_render_entries_has_inline_edit_forms_with_resistance_defaults(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "duration_minutes": "5",
+                "device_watts": "250",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+            },
+        )
+
+        html = render_entries(self.conn)
+
+        self.assertIn('/entries/sprint/update', html)
+        self.assertIn('/entries/lap/update', html)
+        self.assertIn('name="sprint_index"', html)
+        self.assertIn('name="lap_index"', html)
+        self.assertIn('<option value="4" selected>4</option>', html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)

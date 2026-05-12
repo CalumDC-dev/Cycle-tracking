@@ -32,6 +32,7 @@ class CalculatedLap:
     performed_on: str
     started_at: str | None
     lap_index: int | None
+    circuit_id: int | None
     circuit_name: str | None
     lap_time_minutes: float | None
     length: float | None
@@ -192,6 +193,7 @@ def calculated_laps(conn: sqlite3.Connection) -> list[CalculatedLap]:
                 performed_on=row["performed_on"],
                 started_at=row["started_at"],
                 lap_index=row["lap_index"],
+                circuit_id=row["circuit_id"],
                 circuit_name=row["circuit_name"],
                 lap_time_minutes=row["lap_time_minutes"],
                 length=row["length"],
