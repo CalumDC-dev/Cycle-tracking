@@ -1,5 +1,8 @@
+import json
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 from workout_tracker.calculations import calculated_laps, calculated_sprints
 from workout_tracker.database import init_db
@@ -15,6 +18,7 @@ from workout_tracker.web import (
     add_circuit,
     confirm_duplicate_activity,
     find_activity_duplicate,
+    import_activity_file_to_review,
     promote_raw_activity,
     raw_activity_has_entry,
     classify_activity,
@@ -258,6 +262,7 @@ class WebActionTests(unittest.TestCase):
                 "performed_on": "2026-05-05",
                 "duration_minutes": "5",
                 "device_distance": "8",
+                "hr": "127",
                 "resistance": "4",
             },
         )
@@ -280,6 +285,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(raw["review_status"], "already_logged")
         self.assertEqual(raw["duplicate_entry_type"], "sprint")
         self.assertEqual(raw["duplicate_entry_id"], sprint_id)
+        self.assertEqual(raw["hr"], 127)
         self.assertEqual(sprint["started_at"], "2026-05-05T06:15")
 
     def test_raw_activity_possible_duplicate_does_not_auto_backfill(self):
@@ -316,6 +322,7 @@ class WebActionTests(unittest.TestCase):
                 "performed_on": "2026-05-07",
                 "duration_minutes": "20",
                 "device_distance": "8",
+                "hr": "131",
             },
         )
         add_raw_activity(
@@ -335,6 +342,7 @@ class WebActionTests(unittest.TestCase):
         raw = self.conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
         sprint = self.conn.execute("SELECT started_at FROM sprint_entries WHERE performed_on = ?", ("2026-05-07",)).fetchone()
         self.assertEqual(raw["review_status"], "already_logged")
+        self.assertEqual(raw["hr"], 131)
         self.assertEqual(sprint["started_at"], "2026-05-07T06:15")
 
     def test_new_raw_activity_without_hr_goes_to_hr_queue(self):
@@ -351,6 +359,63 @@ class WebActionTests(unittest.TestCase):
 
         raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("new-no-hr",)).fetchone()
         self.assertEqual(raw["review_status"], "needs_hr")
+        self.assertEqual(raw["session_type"], "sprint")
+
+    def test_new_raw_activity_matching_circuit_goal_is_preclassified_as_lap(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "new-lap-guess",
+                "started_on": "2026-05-08T07:15",
+                "duration_seconds": "240",
+                "raw_distance": "4",
+            },
+        )
+
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("new-lap-guess",)).fetchone()
+        self.assertEqual(raw["review_status"], "needs_hr")
+        self.assertEqual(raw["session_type"], "lap")
+        self.assertEqual(raw["circuit_id"], 1)
+
+    def test_repeat_raw_activity_import_enriches_existing_payload_without_resetting_review(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "same-activity",
+                "title": "Initial",
+                "started_on": "2026-05-08T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "3",
+            },
+        )
+        self.conn.execute(
+            "UPDATE raw_activities SET review_status = 'already_logged', raw_payload = ? WHERE source_activity_id = ?",
+            (json.dumps({"existing": True}), "same-activity"),
+        )
+        self.conn.commit()
+
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "same-activity",
+                "title": "Better title",
+                "started_on": "2026-05-08T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "3",
+                "raw_payload": json.dumps({"average_watts": 250.0, "archive_format": "strava_bulk_export"}),
+            },
+        )
+
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("same-activity",)).fetchone()
+        payload = json.loads(raw["raw_payload"])
+        self.assertEqual(raw["review_status"], "already_logged")
+        self.assertEqual(raw["title"], "Initial")
+        self.assertTrue(payload["existing"])
+        self.assertEqual(payload["average_watts"], 250.0)
+        self.assertEqual(payload["archive_format"], "strava_bulk_export")
 
     def test_find_activity_duplicate_can_match_lap_by_circuit_goal(self):
         add_lap_entry(
@@ -443,6 +508,34 @@ class WebActionTests(unittest.TestCase):
         self.assertAlmostEqual(sprint["device_distance"], 8.0)
         self.assertTrue(raw_activity_has_entry(self.conn, raw_id))
 
+    def test_promote_raw_activity_uses_source_payload_defaults_for_sprint(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "payload-sprint",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+                "raw_payload": json.dumps({"average_cadence": 119.5, "average_watts": 287.25}),
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("payload-sprint",)).fetchone()["id"]
+
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "sprint",
+                "performed_on": "2026-05-10",
+                "hr": "128",
+            },
+        )
+
+        sprint = self.conn.execute("SELECT rpm, device_watts FROM sprint_entries WHERE raw_activity_id = ?", (raw_id,)).fetchone()
+        self.assertAlmostEqual(sprint["rpm"], 119.5)
+        self.assertAlmostEqual(sprint["device_watts"], 287.25)
+
     def test_promote_raw_activity_imports_lap_with_circuit_and_hr(self):
         add_raw_activity(
             self.conn,
@@ -524,6 +617,42 @@ class WebActionTests(unittest.TestCase):
                     "hr": "126",
                 },
             )
+
+    def test_import_activity_file_to_review_applies_duplicate_and_hr_status(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-13",
+                "duration_minutes": "5",
+                "device_distance": "8",
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "activities.csv"
+            path.write_text(
+                "Activity ID,Activity Name,Activity Date,Elapsed Time,Distance\n"
+                "duplicate,Known ride,2026-05-13T06:15:00,300,8\n"
+                "new,New ride,2026-05-14T06:15:00,300,12\n",
+                encoding="utf-8",
+            )
+
+            imported = import_activity_file_to_review(
+                self.conn,
+                {"source": "strava", "activity_file": str(path)},
+            )
+
+        duplicate = self.conn.execute(
+            "SELECT review_status, duplicate_entry_type FROM raw_activities WHERE source_activity_id = ?",
+            ("duplicate",),
+        ).fetchone()
+        new = self.conn.execute(
+            "SELECT review_status FROM raw_activities WHERE source_activity_id = ?",
+            ("new",),
+        ).fetchone()
+        self.assertEqual(imported, 2)
+        self.assertEqual(duplicate["review_status"], "already_logged")
+        self.assertEqual(duplicate["duplicate_entry_type"], "sprint")
+        self.assertEqual(new["review_status"], "needs_hr")
 
 
 if __name__ == "__main__":

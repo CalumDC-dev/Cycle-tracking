@@ -108,11 +108,12 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(suggestion["circuit_id"], 1)
         self.assertGreater(suggestion["confidence"], 0.99)
 
-    def test_classifier_leaves_non_matching_distance_for_review(self):
+    def test_classifier_treats_non_matching_distance_as_free_form_sprint(self):
         suggestion = suggest_activity_classification(self.conn, 20.0)
 
-        self.assertEqual(suggestion["session_type"], "unknown")
-        self.assertEqual(suggestion["confidence"], 0.0)
+        self.assertEqual(suggestion["session_type"], "sprint")
+        self.assertGreater(suggestion["confidence"], 0.0)
+        self.assertIn("free-form sprint", suggestion["reason"])
 
     def _seed(self):
         self.conn.execute(

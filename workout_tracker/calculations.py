@@ -377,10 +377,25 @@ def suggest_activity_classification(conn: sqlite3.Connection, raw_distance: floa
             "confidence": max(0.0, 1 - best["pct_diff"]),
             "reason": f"Raw distance is within {best['pct_diff']:.1%} of {best['circuit_name']} target.",
         }
+    if raw_distance > 0:
+        if best:
+            return {
+                "session_type": "sprint",
+                "confidence": 0.45,
+                "reason": (
+                    f"No circuit target was within 3% of the raw distance; closest was "
+                    f"{best['circuit_name']} at {best['pct_diff']:.1%} away, so this is treated as a free-form sprint."
+                ),
+            }
+        return {
+            "session_type": "sprint",
+            "confidence": 0.4,
+            "reason": "No active circuit targets exist, so this is treated as a free-form sprint.",
+        }
     return {
         "session_type": "unknown",
         "confidence": 0.0,
-        "reason": "No circuit target was within 3% of the raw distance.",
+        "reason": "Raw distance was not usable for classification.",
     }
 
 
