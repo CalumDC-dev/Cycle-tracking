@@ -12,6 +12,7 @@ from typing import Any
 class CalculatedSprint:
     id: int
     performed_on: str
+    started_at: str | None
     sprint_index: int | None
     duration_minutes: float | None
     rpm: float | None
@@ -29,6 +30,7 @@ class CalculatedSprint:
 class CalculatedLap:
     id: int
     performed_on: str
+    started_at: str | None
     lap_index: int | None
     circuit_name: str | None
     lap_time_minutes: float | None
@@ -150,6 +152,7 @@ def calculated_sprints(conn: sqlite3.Connection) -> list[CalculatedSprint]:
             CalculatedSprint(
                 id=int(row["id"]),
                 performed_on=row["performed_on"],
+                started_at=row["started_at"],
                 sprint_index=row["sprint_index"],
                 duration_minutes=row["duration_minutes"],
                 rpm=row["rpm"],
@@ -187,6 +190,7 @@ def calculated_laps(conn: sqlite3.Connection) -> list[CalculatedLap]:
             CalculatedLap(
                 id=int(row["id"]),
                 performed_on=row["performed_on"],
+                started_at=row["started_at"],
                 lap_index=row["lap_index"],
                 circuit_name=row["circuit_name"],
                 lap_time_minutes=row["lap_time_minutes"],

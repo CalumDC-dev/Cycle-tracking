@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
@@ -204,11 +205,17 @@ button.secondary {
 }
 """
 
+STRONG_DUPLICATE_THRESHOLD = 0.85
+POSSIBLE_DUPLICATE_THRESHOLD = 0.6
+
 
 def serve(db_path: str | Path, host: str = "127.0.0.1", port: int = 8000) -> None:
     handler = type("WorkoutHandler", (WorkoutRequestHandler,), {"db_path": Path(db_path)})
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"Serving workout tracker on http://{host}:{port}")
+    try:
+        print(f"Serving workout tracker on http://{host}:{port}", flush=True)
+    except (AttributeError, OSError, RuntimeError):
+        pass
     server.serve_forever()
 
 
@@ -263,6 +270,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
                 self._redirect("/review")
             elif parsed.path == "/review/classify":
                 classify_activity(conn, params)
+                self._redirect("/review")
+            elif parsed.path == "/review/confirm-duplicate":
+                confirm_duplicate_activity(conn, params)
                 self._redirect("/review")
             elif parsed.path == "/entries/sprint/add":
                 add_sprint_entry(conn, params)
@@ -449,6 +459,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <h2>Add Sprint Entry</h2>
   <form class="stack" method="post" action="/entries/sprint/add">
     <label>Date<input name="performed_on" type="date" required></label>
+    <label>Start time<input name="started_at" type="datetime-local"></label>
     <label>Day number<input name="day_number" type="number" min="1"></label>
     <label>Sprint number<input name="sprint_index" type="number" min="1"></label>
     <label>Duration minutes<input name="duration_minutes" type="number" step="0.001" min="0"></label>
@@ -465,6 +476,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <h2>Add Lap Entry</h2>
   <form class="stack" method="post" action="/entries/lap/add">
     <label>Date<input name="performed_on" type="date" required></label>
+    <label>Start time<input name="started_at" type="datetime-local"></label>
     <label>Lap number<input name="lap_index" type="number" min="1"></label>
     <label>Circuit<select name="circuit_id" required id="lap-circuit">{circuit_select_options(circuits)}</select></label>
     <label>Kinomap goal<input id="lap-goal" readonly></label>
@@ -480,10 +492,11 @@ def render_entries(conn: sqlite3.Connection) -> str:
 <section class="band">
   <h2>Sprint Entries</h2>
   {table(
-        ["Date", "Sprint", "Time", "RPM", "Device watts", "Estimated watts", "HR", "Resistance", "Cal distance", "Calories"],
+        ["Date", "Start", "Sprint", "Time", "RPM", "Device watts", "Estimated watts", "HR", "Resistance", "Cal distance", "Calories"],
         [
             [
                 sprint.performed_on,
+                fmt_start_time(sprint.started_at),
                 sprint.sprint_index,
                 fmt_minutes(sprint.duration_minutes),
                 fmt_num(sprint.rpm, 0),
@@ -501,10 +514,11 @@ def render_entries(conn: sqlite3.Connection) -> str:
 <section class="band">
   <h2>Lap Entries</h2>
   {table(
-        ["Date", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories"],
+        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories"],
         [
             [
                 lap.performed_on,
+                fmt_start_time(lap.started_at),
                 lap.lap_index,
                 lap.circuit_name,
                 fmt_minutes(lap.lap_time_minutes),
@@ -619,12 +633,23 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
 
 def render_review(conn: sqlite3.Connection) -> str:
     circuits = conn.execute("SELECT id, name FROM circuits WHERE active = 1 ORDER BY name").fetchall()
-    rows = conn.execute(
+    queue_rows = conn.execute(
         """
         SELECT r.*, c.name AS circuit_name
         FROM raw_activities r
         LEFT JOIN circuits c ON c.id = r.circuit_id
+        WHERE r.review_status NOT IN ('already_logged', 'reviewed', 'ignored')
         ORDER BY r.imported_at DESC, r.id DESC
+        """
+    ).fetchall()
+    history_rows = conn.execute(
+        """
+        SELECT r.*, c.name AS circuit_name
+        FROM raw_activities r
+        LEFT JOIN circuits c ON c.id = r.circuit_id
+        WHERE r.review_status IN ('already_logged', 'reviewed', 'ignored')
+        ORDER BY r.imported_at DESC, r.id DESC
+        LIMIT 30
         """
     ).fetchall()
     return f"""
@@ -634,22 +659,27 @@ def render_review(conn: sqlite3.Connection) -> str:
     <label>Source<input name="source" value="manual" required></label>
     <label>Source ID<input name="source_activity_id"></label>
     <label>Title<input name="title" placeholder="Kinomap free-ride"></label>
-    <label>Date<input name="started_on" type="date"></label>
+    <label>Start time<input name="started_on" type="datetime-local"></label>
     <label>Duration seconds<input name="duration_seconds" type="number"></label>
     <label>Raw distance<input name="raw_distance" type="number" step="0.001"></label>
+    <label>HR<input name="hr" type="number" min="0"></label>
     <button type="submit">Add to review</button>
   </form>
 </section>
 <section class="band">
   <h2>Review Queue</h2>
-  {raw_activity_table(rows, circuits)}
+  {raw_activity_table(queue_rows, circuits)}
+</section>
+<section class="band">
+  <h2>Import History</h2>
+  {raw_activity_table(history_rows, circuits, readonly=True)}
 </section>
 """
 
 
-def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row]) -> str:
+def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], readonly: bool = False) -> str:
     if not rows:
-        return '<div class="empty">No raw activities yet. Strava imports will appear here later; for now you can add one manually above.</div>'
+        return '<div class="empty">No raw activities in this section.</div>'
     circuit_options = '<option value="">No circuit</option>' + "".join(
         f'<option value="{row["id"]}">{escape(row["name"])}</option>' for row in circuits
     )
@@ -664,29 +694,69 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row]) -> 
   <td>{escape(str(row['title'] or ''))}</td>
   <td>{escape(str(row['started_on'] or ''))}</td>
   <td>{fmt_num(row['raw_distance'], 3)}</td>
-  <td>{escape(str(row['session_type']))}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
-  <td>
-    <form class="stack" method="post" action="/review/classify">
-      <input type="hidden" name="id" value="{row['id']}">
-      <label>Type
-        <select name="session_type">
-          {select_option('unknown', row['session_type'])}
-          {select_option('lap', row['session_type'])}
-          {select_option('sprint', row['session_type'])}
-          {select_option('endurance', row['session_type'])}
-          {select_option('ignore', row['session_type'])}
-        </select>
-      </label>
-      <label>Circuit<select name="circuit_id">{options}</select></label>
-      <button type="submit">Confirm</button>
-    </form>
-  </td>
+  <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
+  <td>{duplicate_match_label(row)}</td>
+  <td>{'' if readonly else review_actions(row, options)}</td>
 </tr>""")
     return f"""
 <table>
-  <thead><tr><th>Source</th><th>Title</th><th>Date</th><th>Raw distance</th><th>Current classification</th><th>Review</th></tr></thead>
+  <thead><tr><th>Source</th><th>Title</th><th>Start</th><th>Raw distance</th><th>Status</th><th>Possible match</th><th>Review</th></tr></thead>
   <tbody>{''.join(rendered)}</tbody>
 </table>"""
+
+
+def review_status_label(row: sqlite3.Row) -> str:
+    status = str(row["review_status"] or "needs_review")
+    session = str(row["session_type"] or "unknown")
+    label = {
+        "already_logged": "Already logged",
+        "possible_duplicate": "Possible duplicate",
+        "needs_hr": "Needs HR",
+        "needs_review": "Needs review",
+        "reviewed": "Reviewed",
+        "ignored": "Ignored",
+    }.get(status, status.replace("_", " ").title())
+    return f"{escape(label)}<br><span class=\"muted\">{escape(session)}</span>"
+
+
+def duplicate_match_label(row: sqlite3.Row) -> str:
+    if not row["duplicate_entry_type"] or not row["duplicate_entry_id"]:
+        return '<span class="muted">No match</span>'
+    confidence = row["duplicate_confidence"]
+    pieces = [
+        f"{row['duplicate_entry_type']} #{row['duplicate_entry_id']}",
+        fmt_num(confidence, 2) if confidence is not None else "",
+    ]
+    reason = row["duplicate_reason"] or ""
+    return f"{escape(' - '.join(piece for piece in pieces if piece))}<br><span class=\"muted\">{escape(str(reason))}</span>"
+
+
+def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
+    confirm_duplicate = ""
+    if row["duplicate_entry_type"] and row["duplicate_entry_id"]:
+        confirm_duplicate = f"""
+      <form method="post" action="/review/confirm-duplicate">
+        <input type="hidden" name="id" value="{row['id']}">
+        <button class="secondary" type="submit">Confirm duplicate</button>
+      </form>"""
+    return f"""
+    <div style="display:grid; gap:8px;">
+      {confirm_duplicate}
+      <form class="stack" method="post" action="/review/classify">
+        <input type="hidden" name="id" value="{row['id']}">
+        <label>Type
+          <select name="session_type">
+            {select_option('unknown', row['session_type'])}
+            {select_option('lap', row['session_type'])}
+            {select_option('sprint', row['session_type'])}
+            {select_option('endurance', row['session_type'])}
+            {select_option('ignore', row['session_type'])}
+          </select>
+        </label>
+        <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
+        <button type="submit">Confirm</button>
+      </form>
+    </div>"""
 
 
 def resistance_factor_row(row: dict[str, object]) -> str:
@@ -862,64 +932,312 @@ def add_circuit(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.commit()
 
 
+def find_activity_duplicate(
+    conn: sqlite3.Connection,
+    *,
+    started_on: str | None,
+    duration_seconds: int | None,
+    raw_distance: float | None,
+    session_type: str = "unknown",
+    circuit_id: int | None = None,
+) -> dict[str, object] | None:
+    profile = editable_calibration_profile(conn)
+    length_scale = float(profile["length_scale"])
+    candidates: list[dict[str, object]] = []
+
+    for row in conn.execute(
+        """
+        SELECT id, performed_on, started_at, duration_minutes, device_distance
+        FROM sprint_entries
+        """
+    ).fetchall():
+        score, reason = duplicate_score(
+            started_on=started_on,
+            duration_seconds=duration_seconds,
+            raw_distance=raw_distance,
+            candidate_date=row["performed_on"],
+            candidate_started_at=row["started_at"],
+            candidate_minutes=row["duration_minutes"],
+            candidate_raw_distance=row["device_distance"],
+            circuit_match=False,
+        )
+        if score >= POSSIBLE_DUPLICATE_THRESHOLD:
+            candidates.append({
+                "entry_type": "sprint",
+                "entry_id": int(row["id"]),
+                "circuit_id": None,
+                "confidence": score,
+                "reason": reason,
+            })
+
+    for row in conn.execute(
+        """
+        SELECT l.id, l.performed_on, l.started_at, l.lap_time_minutes, l.circuit_id, c.length
+        FROM lap_entries l
+        LEFT JOIN circuits c ON c.id = l.circuit_id
+        """
+    ).fetchall():
+        candidate_device_distance = device_distance_for_length(row["length"], length_scale)
+        score, reason = duplicate_score(
+            started_on=started_on,
+            duration_seconds=duration_seconds,
+            raw_distance=raw_distance,
+            candidate_date=row["performed_on"],
+            candidate_started_at=row["started_at"],
+            candidate_minutes=row["lap_time_minutes"],
+            candidate_raw_distance=candidate_device_distance,
+            circuit_match=session_type == "lap" and circuit_id is not None and circuit_id == row["circuit_id"],
+        )
+        if score >= POSSIBLE_DUPLICATE_THRESHOLD:
+            candidates.append({
+                "entry_type": "lap",
+                "entry_id": int(row["id"]),
+                "circuit_id": row["circuit_id"],
+                "confidence": score,
+                "reason": reason,
+            })
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: float(candidate["confidence"]))
+
+
+def duplicate_score(
+    *,
+    started_on: str | None,
+    duration_seconds: int | None,
+    raw_distance: float | None,
+    candidate_date: str | None,
+    candidate_started_at: str | None,
+    candidate_minutes: float | None,
+    candidate_raw_distance: float | None,
+    circuit_match: bool,
+) -> tuple[float, str]:
+    score = 0.0
+    reasons = []
+    day_delta = date_delta_days(started_on, candidate_date)
+    if day_delta == 0:
+        score += 0.25
+        reasons.append("same date")
+    elif day_delta == 1:
+        score += 0.12
+        reasons.append("adjacent date")
+
+    start_delta = start_delta_minutes(started_on, candidate_started_at)
+    if start_delta is not None:
+        if start_delta <= 2:
+            score += 0.25
+            reasons.append("start time within 2 minutes")
+        elif start_delta <= 10:
+            score += 0.18
+            reasons.append("start time within 10 minutes")
+        elif start_delta <= 60:
+            score += 0.08
+            reasons.append("start time within 60 minutes")
+
+    duration_score, duration_reason = similarity_score(
+        duration_seconds,
+        candidate_minutes * 60 if candidate_minutes is not None else None,
+        exact_points=0.25,
+        close_points=0.18,
+        loose_points=0.08,
+    )
+    score += duration_score
+    if duration_reason:
+        reasons.append(f"duration {duration_reason}")
+
+    distance_score, distance_reason = similarity_score(
+        raw_distance,
+        candidate_raw_distance,
+        exact_points=0.35,
+        close_points=0.24,
+        loose_points=0.1,
+    )
+    score += distance_score
+    if distance_reason:
+        reasons.append(f"distance {distance_reason}")
+
+    if circuit_match:
+        score += 0.1
+        reasons.append("same circuit target")
+
+    return min(score, 1.0), "; ".join(reasons)
+
+
+def similarity_score(
+    observed: float | int | None,
+    expected: float | int | None,
+    *,
+    exact_points: float,
+    close_points: float,
+    loose_points: float,
+) -> tuple[float, str | None]:
+    if observed is None or expected in (None, 0):
+        return 0.0, None
+    pct_diff = abs(float(observed) - float(expected)) / abs(float(expected))
+    if pct_diff <= 0.03:
+        return exact_points, f"within {pct_diff:.1%}"
+    if pct_diff <= 0.08:
+        return close_points, f"within {pct_diff:.1%}"
+    if pct_diff <= 0.15:
+        return loose_points, f"within {pct_diff:.1%}"
+    return 0.0, None
+
+
+def suggestion_for_duplicate(suggestion: dict[str, object], duplicate: dict[str, object]) -> dict[str, object]:
+    output = dict(suggestion)
+    entry_type = str(duplicate["entry_type"])
+    if entry_type in {"lap", "sprint"}:
+        output["session_type"] = entry_type
+    if entry_type == "lap":
+        output["circuit_id"] = duplicate.get("circuit_id")
+    prefix = "Strong duplicate" if float(duplicate["confidence"]) >= STRONG_DUPLICATE_THRESHOLD else "Possible duplicate"
+    output["confidence"] = duplicate["confidence"]
+    output["reason"] = f"{prefix}: {duplicate['reason']}"
+    return output
+
+
+def review_status_for_activity(duplicate: dict[str, object] | None, hr: int | None) -> str:
+    if duplicate and float(duplicate["confidence"]) >= STRONG_DUPLICATE_THRESHOLD:
+        return "already_logged"
+    if duplicate and float(duplicate["confidence"]) >= POSSIBLE_DUPLICATE_THRESHOLD:
+        return "possible_duplicate"
+    if hr is None:
+        return "needs_hr"
+    return "needs_review"
+
+
+def backfill_duplicate_started_at(
+    conn: sqlite3.Connection,
+    duplicate: dict[str, object],
+    started_on: str | None,
+) -> bool:
+    if not started_on or not has_time_component(started_on):
+        return False
+    table = {"sprint": "sprint_entries", "lap": "lap_entries"}.get(str(duplicate["entry_type"]))
+    if table is None:
+        return False
+    row = conn.execute(f"SELECT started_at FROM {table} WHERE id = ?", (int(duplicate["entry_id"]),)).fetchone()
+    if row is None or row["started_at"]:
+        return False
+    conn.execute(f"UPDATE {table} SET started_at = ? WHERE id = ?", (started_on, int(duplicate["entry_id"])))
+    return True
+
+
 def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     raw_distance = maybe_float(params.get("raw_distance"))
+    started_on = normalize_datetime(empty_to_none(params.get("started_on")))
+    duration_seconds = maybe_int(params.get("duration_seconds"))
+    hr = maybe_int(params.get("hr"))
     suggestion = suggest_activity_classification(conn, raw_distance)
+    duplicate = find_activity_duplicate(
+        conn,
+        started_on=started_on,
+        duration_seconds=duration_seconds,
+        raw_distance=raw_distance,
+        session_type=str(suggestion["session_type"]),
+        circuit_id=suggestion.get("circuit_id"),
+    )
+    if duplicate:
+        suggestion = suggestion_for_duplicate(suggestion, duplicate)
+    review_status = review_status_for_activity(duplicate, hr)
     conn.execute(
         """
         INSERT OR IGNORE INTO raw_activities (
             source, source_activity_id, title, started_on, duration_seconds,
-            raw_distance, session_type, circuit_id, classification_confidence,
-            classification_reason
+            raw_distance, hr, review_status, session_type, circuit_id,
+            classification_confidence, classification_reason,
+            duplicate_entry_type, duplicate_entry_id, duplicate_confidence,
+            duplicate_reason
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             params["source"].strip(),
             empty_to_none(params.get("source_activity_id")),
             empty_to_none(params.get("title")),
-            empty_to_none(params.get("started_on")),
-            maybe_int(params.get("duration_seconds")),
+            started_on,
+            duration_seconds,
             raw_distance,
+            hr,
+            review_status,
             suggestion["session_type"],
             suggestion.get("circuit_id"),
             suggestion["confidence"],
             suggestion["reason"],
+            duplicate["entry_type"] if duplicate else None,
+            duplicate["entry_id"] if duplicate else None,
+            duplicate["confidence"] if duplicate else None,
+            duplicate["reason"] if duplicate else None,
         ),
     )
+    if duplicate and duplicate["confidence"] >= STRONG_DUPLICATE_THRESHOLD:
+        backfill_duplicate_started_at(conn, duplicate, started_on)
     conn.commit()
 
 
 def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     session_type = params["session_type"]
     circuit_id = maybe_int(params.get("circuit_id")) if session_type == "lap" else None
+    review_status = "ignored" if session_type == "ignore" else "reviewed"
     conn.execute(
         """
         UPDATE raw_activities
         SET session_type = ?,
             circuit_id = ?,
-            review_status = 'reviewed',
+            review_status = ?,
             classification_confidence = 1,
             classification_reason = 'Manual review'
         WHERE id = ?
         """,
-        (session_type, circuit_id, int(params["id"])),
+        (session_type, circuit_id, review_status, int(params["id"])),
+    )
+    conn.commit()
+
+
+def confirm_duplicate_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (int(required(params, "id")),)).fetchone()
+    if row is None:
+        raise ValueError("Raw activity was not found.")
+    if not row["duplicate_entry_type"] or not row["duplicate_entry_id"]:
+        raise ValueError("Raw activity does not have a duplicate match.")
+    duplicate = {
+        "entry_type": row["duplicate_entry_type"],
+        "entry_id": row["duplicate_entry_id"],
+        "confidence": row["duplicate_confidence"] or 1.0,
+        "reason": row["duplicate_reason"] or "Manually confirmed duplicate.",
+    }
+    backfilled = backfill_duplicate_started_at(conn, duplicate, row["started_on"])
+    reason = "Manual duplicate confirmation"
+    if backfilled:
+        reason += "; start time backfilled"
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET review_status = 'already_logged',
+            classification_confidence = 1,
+            classification_reason = ?
+        WHERE id = ?
+        """,
+        (reason, row["id"]),
     )
     conn.commit()
 
 
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
+    started_at = normalize_datetime(empty_to_none(params.get("started_at")))
     conn.execute(
         """
         INSERT INTO sprint_entries (
-            performed_on, day_number, sprint_index, duration_minutes,
+            performed_on, started_at, day_number, sprint_index, duration_minutes,
             rpm, device_watts, hr, resistance, device_distance, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             performed_on,
+            started_at,
             maybe_int(params.get("day_number")),
             maybe_int(params.get("sprint_index")),
             maybe_float(params.get("duration_minutes")),
@@ -936,19 +1254,21 @@ def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
 
 def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
+    started_at = normalize_datetime(empty_to_none(params.get("started_at")))
     circuit_id = maybe_int(params.get("circuit_id"))
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
     conn.execute(
         """
         INSERT INTO lap_entries (
-            performed_on, lap_index, circuit_id, lap_time_minutes,
+            performed_on, started_at, lap_index, circuit_id, lap_time_minutes,
             hr, resistance, rpm, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             performed_on,
+            started_at,
             maybe_int(params.get("lap_index")),
             circuit_id,
             maybe_float(params.get("lap_time_minutes")),
@@ -1235,6 +1555,79 @@ def fmt_minutes(value: object) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def fmt_start_time(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    parsed = parse_datetime(text)
+    if parsed is not None and has_time_component(text):
+        return parsed.strftime("%H:%M")
+    return text
+
+
+def normalize_datetime(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if " " in cleaned and "T" not in cleaned:
+        cleaned = cleaned.replace(" ", "T", 1)
+    return cleaned
+
+
+def has_time_component(value: str | None) -> bool:
+    if value is None:
+        return False
+    cleaned = value.strip()
+    return len(cleaned) > 10 and ("T" in cleaned or " " in cleaned)
+
+
+def parse_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    cleaned = normalize_datetime(value)
+    if cleaned is None:
+        return None
+    if cleaned.endswith("Z"):
+        cleaned = f"{cleaned[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def date_delta_days(started_on: str | None, candidate_date: str | None) -> int | None:
+    activity_date = date_part(started_on)
+    manual_date = date_part(candidate_date)
+    if activity_date is None or manual_date is None:
+        return None
+    try:
+        return abs((datetime.fromisoformat(activity_date) - datetime.fromisoformat(manual_date)).days)
+    except ValueError:
+        return None
+
+
+def start_delta_minutes(started_on: str | None, candidate_started_at: str | None) -> float | None:
+    activity_start = parse_datetime(started_on)
+    manual_start = parse_datetime(candidate_started_at)
+    if activity_start is None or manual_start is None:
+        return None
+    return abs((activity_start - manual_start).total_seconds()) / 60
+
+
+def date_part(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if len(cleaned) < 10:
+        return None
+    return cleaned[:10]
 
 
 def maybe_float(value: str | None) -> float | None:

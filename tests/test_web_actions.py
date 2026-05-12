@@ -4,6 +4,7 @@ import unittest
 from workout_tracker.calculations import calculated_laps, calculated_sprints
 from workout_tracker.database import init_db
 from workout_tracker.web import (
+    add_raw_activity,
     add_lap_entry,
     add_mass_log,
     add_resistance_calibration_test,
@@ -12,6 +13,8 @@ from workout_tracker.web import (
     circuit_rows_with_goals,
     editable_calibration_profile,
     add_circuit,
+    confirm_duplicate_activity,
+    find_activity_duplicate,
     update_circuit,
     update_calibration_profile,
     update_mass_log,
@@ -56,6 +59,7 @@ class WebActionTests(unittest.TestCase):
             self.conn,
             {
                 "performed_on": "2026-05-02",
+                "started_at": "2026-05-02T07:30",
                 "day_number": "2",
                 "sprint_index": "1",
                 "duration_minutes": "5",
@@ -70,6 +74,7 @@ class WebActionTests(unittest.TestCase):
 
         sprint = calculated_sprints(self.conn)[0]
         self.assertEqual(sprint.performed_on, "2026-05-02")
+        self.assertEqual(sprint.started_at, "2026-05-02T07:30")
         self.assertAlmostEqual(sprint.estimated_watts, 50.0)
         self.assertAlmostEqual(sprint.calibrated_distance, 4.0)
 
@@ -78,6 +83,7 @@ class WebActionTests(unittest.TestCase):
             self.conn,
             {
                 "performed_on": "2026-05-02",
+                "started_at": "2026-05-02T07:45",
                 "lap_index": "1",
                 "circuit_id": "1",
                 "lap_time_minutes": "4",
@@ -90,6 +96,7 @@ class WebActionTests(unittest.TestCase):
 
         lap = calculated_laps(self.conn)[0]
         self.assertEqual(lap.circuit_name, "Manual Circuit")
+        self.assertEqual(lap.started_at, "2026-05-02T07:45")
         self.assertAlmostEqual(lap.average_speed, 30.0)
 
     def test_add_lap_entry_rejects_missing_circuit(self):
@@ -240,6 +247,131 @@ class WebActionTests(unittest.TestCase):
         )
         updated = self.conn.execute("SELECT mass_kg FROM mass_log WHERE id = ?", (row["id"],)).fetchone()
         self.assertAlmostEqual(updated["mass_kg"], 79.25)
+
+    def test_raw_activity_strong_duplicate_links_and_backfills_sprint_start(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-05",
+                "duration_minutes": "5",
+                "device_distance": "8",
+                "resistance": "4",
+            },
+        )
+        sprint_id = self.conn.execute("SELECT id FROM sprint_entries WHERE performed_on = ?", ("2026-05-05",)).fetchone()["id"]
+
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "abc123",
+                "title": "Kinomap free-ride",
+                "started_on": "2026-05-05T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+            },
+        )
+
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("abc123",)).fetchone()
+        sprint = self.conn.execute("SELECT started_at FROM sprint_entries WHERE id = ?", (sprint_id,)).fetchone()
+        self.assertEqual(raw["review_status"], "already_logged")
+        self.assertEqual(raw["duplicate_entry_type"], "sprint")
+        self.assertEqual(raw["duplicate_entry_id"], sprint_id)
+        self.assertEqual(sprint["started_at"], "2026-05-05T06:15")
+
+    def test_raw_activity_possible_duplicate_does_not_auto_backfill(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-06",
+                "duration_minutes": "20",
+                "device_distance": "8",
+                "resistance": "4",
+            },
+        )
+
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "possible",
+                "started_on": "2026-05-06T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+            },
+        )
+
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("possible",)).fetchone()
+        sprint = self.conn.execute("SELECT started_at FROM sprint_entries WHERE performed_on = ?", ("2026-05-06",)).fetchone()
+        self.assertEqual(raw["review_status"], "possible_duplicate")
+        self.assertIsNone(sprint["started_at"])
+
+    def test_confirm_duplicate_backfills_possible_match(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-07",
+                "duration_minutes": "20",
+                "device_distance": "8",
+            },
+        )
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "confirm-me",
+                "started_on": "2026-05-07T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("confirm-me",)).fetchone()["id"]
+
+        confirm_duplicate_activity(self.conn, {"id": str(raw_id)})
+
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+        sprint = self.conn.execute("SELECT started_at FROM sprint_entries WHERE performed_on = ?", ("2026-05-07",)).fetchone()
+        self.assertEqual(raw["review_status"], "already_logged")
+        self.assertEqual(sprint["started_at"], "2026-05-07T06:15")
+
+    def test_new_raw_activity_without_hr_goes_to_hr_queue(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "new-no-hr",
+                "started_on": "2026-05-08T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "3",
+            },
+        )
+
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("new-no-hr",)).fetchone()
+        self.assertEqual(raw["review_status"], "needs_hr")
+
+    def test_find_activity_duplicate_can_match_lap_by_circuit_goal(self):
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-09",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+            },
+        )
+
+        duplicate = find_activity_duplicate(
+            self.conn,
+            started_on="2026-05-09T06:15",
+            duration_seconds=240,
+            raw_distance=4.0,
+            session_type="lap",
+            circuit_id=1,
+        )
+
+        self.assertIsNotNone(duplicate)
+        assert duplicate is not None
+        self.assertEqual(duplicate["entry_type"], "lap")
+        self.assertGreaterEqual(duplicate["confidence"], 0.85)
 
 
 if __name__ == "__main__":
