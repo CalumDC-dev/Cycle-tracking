@@ -58,7 +58,9 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(row["sprint_count"], 1)
         self.assertEqual(row["lap_count"], 1)
         self.assertAlmostEqual(row["total_distance"], 6.0)
-        self.assertAlmostEqual(row["total_calories"], 39.8)
+        self.assertAlmostEqual(row["sprint_calories"], 37.3333333333)
+        self.assertAlmostEqual(row["lap_calories"], 12.8)
+        self.assertAlmostEqual(row["total_calories"], 50.1333333333)
         self.assertAlmostEqual(row["average_watts"], 45.0)
         self.assertAlmostEqual(row["average_rpm"], 115.0)
 

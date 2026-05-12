@@ -32,6 +32,7 @@ class CalculatedLap:
     performed_on: str
     started_at: str | None
     lap_index: int | None
+    circuit_id: int | None
     circuit_name: str | None
     lap_time_minutes: float | None
     length: float | None
@@ -192,6 +193,7 @@ def calculated_laps(conn: sqlite3.Connection) -> list[CalculatedLap]:
                 performed_on=row["performed_on"],
                 started_at=row["started_at"],
                 lap_index=row["lap_index"],
+                circuit_id=row["circuit_id"],
                 circuit_name=row["circuit_name"],
                 lap_time_minutes=row["lap_time_minutes"],
                 length=row["length"],
@@ -229,7 +231,7 @@ def daily_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         day = days[sprint.performed_on]
         day["date"] = sprint.performed_on
         day["sprint_count"] += 1
-        day["sprint_calories"] += sprint.calories_watts or 0
+        day["sprint_calories"] += sprint.calories_mets or 0
         day["sprint_minutes"] += sprint.duration_minutes or 0
         day["sprint_device_distance"] += sprint.device_distance or 0
         day["sprint_calibrated_distance"] += sprint.calibrated_distance or 0

@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterable
 
+from .activity_metrics import source_metric_rows
 from .calculations import calculated_laps, calculated_sprints, daily_summary
 
 
@@ -17,6 +18,7 @@ def export_all(conn: sqlite3.Connection, out_dir: str | Path = "exports") -> lis
         _write_dicts(output / "daily_summary.csv", daily_summary(conn)),
         _write_dicts(output / "sprints.csv", [sprint.__dict__ for sprint in calculated_sprints(conn)]),
         _write_dicts(output / "laps.csv", [lap.__dict__ for lap in calculated_laps(conn)]),
+        _write_dicts(output / "source_metrics.csv", source_metric_rows(conn)),
         _write_query(conn, output / "circuits.csv", "SELECT * FROM circuits ORDER BY name"),
         _write_query(conn, output / "raw_activities.csv", "SELECT * FROM raw_activities ORDER BY imported_at DESC, id DESC"),
     ]
@@ -49,4 +51,3 @@ def _write_dicts(path: Path, rows: list[dict[str, object]]) -> Path:
 def _write_query(conn: sqlite3.Connection, path: Path, query: str) -> Path:
     rows = [dict(row) for row in conn.execute(query).fetchall()]
     return _write_dicts(path, rows)
-
