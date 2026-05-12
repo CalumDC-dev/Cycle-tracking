@@ -242,11 +242,18 @@ class WebActionTests(unittest.TestCase):
 
         items = maintenance_items(self.conn)
         issues = {item["issue"] for item in items}
+        categories = {item["issue"]: item["category"] for item in items}
         html = render_maintenance(self.conn)
 
         self.assertIn("Missing HR", issues)
         self.assertIn("Missing resistance", issues)
         self.assertIn("Pending needs_hr", issues)
+        self.assertEqual(categories["Missing HR"], "Analysis blocker")
+        self.assertEqual(categories["Missing sprint number"], "Tidying")
+        self.assertEqual(categories["Missing device watts"], "Optional enrichment")
+        self.assertIn("Analysis blocker", html)
+        self.assertIn("Tidying", html)
+        self.assertIn("Optional enrichment", html)
         self.assertIn("/entries#sprint-", html)
         self.assertIn("/review", html)
         self.assertIn("/export/backup.zip", html)

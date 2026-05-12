@@ -816,6 +816,9 @@ def render_maintenance(conn: sqlite3.Connection) -> str:
     items = maintenance_items(conn)
     review_count = sum(1 for item in items if item["area"] == "Review")
     entry_count = len(items) - review_count
+    blocker_count = sum(1 for item in items if item["category"] == "Analysis blocker")
+    tidy_count = sum(1 for item in items if item["category"] == "Tidying")
+    enrichment_count = sum(1 for item in items if item["category"] == "Optional enrichment")
     return f"""
 <section class="band">
   <h2>Backup</h2>
@@ -829,6 +832,9 @@ def render_maintenance(conn: sqlite3.Connection) -> str:
   <h2>Data Quality</h2>
   <div class="metrics">
     {metric("Open issues", len(items), "amber" if items else "green")}
+    {metric("Blockers", blocker_count, "red" if blocker_count else "green")}
+    {metric("Tidying", tidy_count, "amber" if tidy_count else "green")}
+    {metric("Enrichment", enrichment_count, "blue")}
     {metric("Entry fixes", entry_count, "blue")}
     {metric("Review items", review_count, "red" if review_count else "green")}
   </div>
@@ -847,62 +853,62 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
         action = f"/entries#sprint-{sprint.id}"
         maybe_add_issue(
             items, not sprint.started_at, "Sprint", sprint.performed_on, sprint.started_at, context,
-            "Missing start time", "Needed for reliable duplicate matching.", action,
+            "Tidying", "Missing start time", "Needed for reliable duplicate matching.", action,
         )
         maybe_add_issue(
             items, sprint.sprint_index is None, "Sprint", sprint.performed_on, sprint.started_at, context,
-            "Missing sprint number", "Helps order multiple free-flow sessions on the same day.", action,
+            "Tidying", "Missing sprint number", "Helps order multiple free-flow sessions on the same day.", action,
         )
         maybe_add_issue(
             items, sprint.hr is None, "Sprint", sprint.performed_on, sprint.started_at, context,
-            "Missing HR", "Needed for the primary HR/MET calorie estimate.", action,
+            "Analysis blocker", "Missing HR", "Needed for the primary HR/MET calorie estimate.", action,
         )
         maybe_add_issue(
             items, sprint.resistance is None, "Sprint", sprint.performed_on, sprint.started_at, context,
-            "Missing resistance", "Needed for estimated watts and resistance-scaled comparisons.", action,
+            "Analysis blocker", "Missing resistance", "Needed for estimated watts and resistance-scaled comparisons.", action,
         )
         maybe_add_issue(
             items, sprint.duration_minutes is None, "Sprint", sprint.performed_on, sprint.started_at, context,
-            "Missing duration", "Needed for calories, pace, and session totals.", action,
+            "Analysis blocker", "Missing duration", "Needed for calories, pace, and session totals.", action,
         )
         maybe_add_issue(
             items, sprint.device_watts is None, "Sprint", sprint.performed_on, sprint.started_at, context,
-            "Missing device watts", "Needed for estimated watts and watts-based comparisons.", action,
+            "Optional enrichment", "Missing device watts", "Needed for estimated watts and watts-based comparisons.", action,
         )
         if sprint.hr is not None and sprint.duration_minutes is not None and sprint.calories_mets is None:
-            add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
+            add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Analysis blocker", "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
         if sprint.resistance is not None and sprint.device_watts is not None and sprint.estimated_watts is None:
-            add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Missing resistance factor", "Add a scaling factor for this resistance level.", f"/calibration")
+            add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Analysis blocker", "Missing resistance factor", "Add a scaling factor for this resistance level.", f"/calibration")
 
     for lap in calculated_laps(conn):
         context = f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id}"
         action = f"/entries#lap-{lap.id}"
         maybe_add_issue(
             items, not lap.started_at, "Lap", lap.performed_on, lap.started_at, context,
-            "Missing start time", "Needed for reliable duplicate matching.", action,
+            "Tidying", "Missing start time", "Needed for reliable duplicate matching.", action,
         )
         maybe_add_issue(
             items, lap.lap_index is None, "Lap", lap.performed_on, lap.started_at, context,
-            "Missing lap number", "Helps order multiple circuit sessions on the same day.", action,
+            "Tidying", "Missing lap number", "Helps order multiple circuit sessions on the same day.", action,
         )
         maybe_add_issue(
             items, lap.circuit_id is None, "Lap", lap.performed_on, lap.started_at, context,
-            "Missing circuit", "Needed for lap distance, speed, and circuit leaderboards.", action,
+            "Analysis blocker", "Missing circuit", "Needed for lap distance, speed, and circuit leaderboards.", action,
         )
         maybe_add_issue(
             items, lap.hr is None, "Lap", lap.performed_on, lap.started_at, context,
-            "Missing HR", "Needed for the primary HR/MET calorie estimate.", action,
+            "Analysis blocker", "Missing HR", "Needed for the primary HR/MET calorie estimate.", action,
         )
         maybe_add_issue(
             items, lap.resistance is None, "Lap", lap.performed_on, lap.started_at, context,
-            "Missing resistance", "Needed for resistance-level analysis and future comparisons.", action,
+            "Optional enrichment", "Missing resistance", "Needed for resistance-level analysis and future comparisons.", action,
         )
         maybe_add_issue(
             items, lap.lap_time_minutes is None, "Lap", lap.performed_on, lap.started_at, context,
-            "Missing lap time", "Needed for calories, speed, and best-lap tracking.", action,
+            "Analysis blocker", "Missing lap time", "Needed for calories, speed, and best-lap tracking.", action,
         )
         if lap.hr is not None and lap.lap_time_minutes is not None and lap.calories_mets is None:
-            add_entry_issue(items, "Lap", lap.performed_on, lap.started_at, context, "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
+            add_entry_issue(items, "Lap", lap.performed_on, lap.started_at, context, "Analysis blocker", "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
 
     review_rows = conn.execute(
         """
@@ -920,12 +926,22 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
             date_part(row["started_on"]) or "",
             row["started_on"],
             context,
+            "Analysis blocker",
             f"Pending {row['review_status']}",
             f"Classified as {row['session_type']}; review before importing or ignoring.",
             "/review",
         )
 
-    return sorted(items, key=lambda item: (str(item["date"] or ""), str(item["start"] or ""), str(item["area"]), str(item["issue"])))
+    return sorted(
+        items,
+        key=lambda item: (
+            maintenance_category_rank(str(item["category"])),
+            str(item["date"] or ""),
+            str(item["start"] or ""),
+            str(item["area"]),
+            str(item["issue"]),
+        ),
+    )
 
 
 def maybe_add_issue(
@@ -935,12 +951,13 @@ def maybe_add_issue(
     date: str | None,
     start: str | None,
     record: str,
+    category: str,
     issue: str,
     detail: str,
     action: str,
 ) -> None:
     if condition:
-        add_entry_issue(items, area, date, start, record, issue, detail, action)
+        add_entry_issue(items, area, date, start, record, category, issue, detail, action)
 
 
 def add_entry_issue(
@@ -949,12 +966,14 @@ def add_entry_issue(
     date: str | None,
     start: str | None,
     record: str,
+    category: str,
     issue: str,
     detail: str,
     action: str,
 ) -> None:
     items.append({
         "area": area,
+        "category": category,
         "date": date or "",
         "start": fmt_start_time(start),
         "record": record,
@@ -971,6 +990,7 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
     for item in items:
         action = escape(str(item["action"]))
         rows.append([
+            escape(str(item["category"])),
             escape(str(item["date"])),
             escape(str(item["start"])),
             escape(str(item["area"])),
@@ -979,7 +999,16 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
             escape(str(item["detail"])),
             f'<a href="{action}">Open</a>',
         ])
-    return html_table(["Date", "Start", "Area", "Record", "Issue", "Detail", ""], rows)
+    return html_table(["Category", "Date", "Start", "Area", "Record", "Issue", "Detail", ""], rows)
+
+
+def maintenance_category_rank(category: str) -> int:
+    order = {
+        "Analysis blocker": 0,
+        "Tidying": 1,
+        "Optional enrichment": 2,
+    }
+    return order.get(category, 9)
 
 
 def render_review(conn: sqlite3.Connection) -> str:
