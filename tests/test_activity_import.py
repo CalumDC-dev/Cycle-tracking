@@ -92,13 +92,13 @@ class ActivityImportTests(unittest.TestCase):
             <Time>2026-05-12T08:07:59Z</Time>
             <Cadence>100</Cadence>
             <HeartRateBpm><Value>122</Value></HeartRateBpm>
-            <Extensions><ns3:TPX><ns3:Watts>250</ns3:Watts></ns3:TPX></Extensions>
+            <Extensions><ns3:TPX><ns3:Speed>5</ns3:Speed><ns3:Watts>250</ns3:Watts></ns3:TPX></Extensions>
           </Trackpoint>
           <Trackpoint>
             <Time>2026-05-12T08:08:00Z</Time>
             <Cadence>120</Cadence>
             <HeartRateBpm><Value>126</Value></HeartRateBpm>
-            <Extensions><ns3:TPX><ns3:Watts>300</ns3:Watts></ns3:TPX></Extensions>
+            <Extensions><ns3:TPX><ns3:Speed>7</ns3:Speed><ns3:Watts>300</ns3:Watts></ns3:TPX></Extensions>
           </Trackpoint>
         </Track>
       </Lap>
@@ -120,6 +120,7 @@ class ActivityImportTests(unittest.TestCase):
         self.assertEqual(rows[0]["hr"], "124")
         self.assertIn('"average_cadence": 110.0', rows[0]["raw_payload"])
         self.assertIn('"average_watts": 275.0', rows[0]["raw_payload"])
+        self.assertIn('"analysis_version": 1', rows[0]["raw_payload"])
         self.assertIn('"max_speed_mps"', rows[0]["raw_payload"])
         self.assertIn('"trackpoint_count": 2', rows[0]["raw_payload"])
 

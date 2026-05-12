@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.parser import BytesParser
+from email import policy
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 from pathlib import Path
+import tempfile
 from urllib.parse import parse_qs, urlparse
 import json
 import sqlite3
 
 from .activity_import import load_activity_file
+from .activity_metrics import source_metric_rows
 from .calculations import (
     calculated_laps,
     calculated_sprints,
@@ -142,6 +147,10 @@ th {
   font-weight: 700;
 }
 tr:hover td { background: #fbfcfe; }
+tr.day-group-a td { background: #fff; }
+tr.day-group-b td { background: #f3f8fc; }
+tr.day-start td { border-top: 2px solid #bdcbd9; }
+tr.day-group-a:hover td, tr.day-group-b:hover td { background: #eef5fb; }
 form.inline {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) 100px 120px 74px 86px;
@@ -193,6 +202,12 @@ button.secondary {
   border-radius: 6px;
 }
 .muted { color: var(--muted); }
+.table-scroll {
+  overflow-x: auto;
+}
+.table-scroll table {
+  min-width: 980px;
+}
 .empty {
   color: var(--muted);
   padding: 18px;
@@ -209,6 +224,15 @@ button.secondary {
 
 STRONG_DUPLICATE_THRESHOLD = 0.85
 POSSIBLE_DUPLICATE_THRESHOLD = 0.6
+
+
+@dataclass(frozen=True)
+class UploadedFile:
+    filename: str
+    content: bytes
+
+
+FormValue = str | UploadedFile
 
 
 def serve(db_path: str | Path, host: str = "127.0.0.1", port: int = 8000) -> None:
@@ -322,11 +346,10 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
         init_db(conn)
         return conn
 
-    def _post_params(self) -> dict[str, str]:
+    def _post_params(self) -> dict[str, FormValue]:
         length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8")
-        parsed = parse_qs(body, keep_blank_values=True)
-        return {key: values[-1] for key, values in parsed.items()}
+        body = self.rfile.read(length)
+        return parse_post_params(self.headers.get("Content-Type", ""), body)
 
     def _html(self, title: str, body: str, active: str) -> None:
         content = page(title, body, active)
@@ -362,6 +385,7 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
                     dict(row)
                     for row in conn.execute("SELECT * FROM raw_activities ORDER BY imported_at DESC, id DESC").fetchall()
                 ],
+                "/export/source_metrics.csv": source_metric_rows(conn),
             }
             if path not in routes:
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -411,9 +435,14 @@ def page(title: str, body: str, active: str) -> str:
 def render_dashboard(conn: sqlite3.Connection) -> str:
     metrics = dashboard_metrics(conn)
     daily = metrics["daily"]
+    source_rows = source_metric_rows(conn)
     calories = [(row["date"], row["total_calories"]) for row in daily]
     watts = [(row["date"], row["average_watts"] or 0) for row in daily]
     mass = [(row["measured_on"], row["mass_kg"]) for row in metrics["mass"]]
+    source_average_watts = source_metric_points(source_rows, "average_watts")
+    source_peak_watts = source_metric_points(source_rows, "best_300s_watts")
+    source_cadence = source_metric_points(source_rows, "average_cadence")
+    source_variability = source_metric_points(source_rows, "watts_variability_pct")
     return f"""
 <section class="band">
   <h2>Overview</h2>
@@ -430,6 +459,15 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
   </div>
 </section>
 <section class="band">
+  <h2>Source Metrics</h2>
+  <div class="metrics">
+    {metric("Metric sessions", len(source_rows), "blue")}
+    {metric("Best 5 min est watts", fmt_num(max_metric(source_rows, "best_300s_watts"), 0), "amber")}
+    {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
+    {metric("Best avg cadence", fmt_num(max_metric(source_rows, "average_cadence"), 0), "green")}
+  </div>
+</section>
+<section class="band">
   <h2>Trends</h2>
   <div class="grid-two">
     {line_chart("Calories", calories, "#a66200")}
@@ -438,8 +476,21 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
   </div>
 </section>
 <section class="band">
+  <h2>Source Metric Trends</h2>
+  <div class="grid-two">
+    {line_chart("Estimated Average Watts", source_average_watts, "#1f5a85")}
+    {line_chart("Best 5 Minute Estimated Watts", source_peak_watts, "#a66200")}
+    {line_chart("Average Cadence", source_cadence, "#2f7d59")}
+    {line_chart("Watts Variability", source_variability, "#a33b3b")}
+  </div>
+</section>
+<section class="band">
   <h2>Best Lap By Circuit</h2>
   {best_laps_table(metrics["best_laps_by_circuit"])}
+</section>
+<section class="band">
+  <h2>Recent Source Metrics</h2>
+  {source_metrics_table(source_rows[:12])}
 </section>
 <section class="band">
   <h2>Daily Summary</h2>
@@ -453,6 +504,7 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
     <a href="/export/laps.csv">Laps CSV</a>
     <a href="/export/circuits.csv">Circuits CSV</a>
     <a href="/export/raw_activities.csv">Raw activities CSV</a>
+    <a href="/export/source_metrics.csv">Source metrics CSV</a>
   </div>
 </section>
 """
@@ -499,7 +551,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Sprint Entries</h2>
-  {table(
+  {grouped_table(
         ["Date", "Start", "Sprint", "Time", "RPM", "Device watts", "Estimated watts", "HR", "Resistance", "Cal distance", "Calories"],
         [
             [
@@ -521,7 +573,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Lap Entries</h2>
-  {table(
+  {grouped_table(
         ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories"],
         [
             [
@@ -640,26 +692,10 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
 
 
 def render_review(conn: sqlite3.Connection) -> str:
+    populate_missing_duplicate_hr(conn)
     circuits = conn.execute("SELECT id, name FROM circuits WHERE active = 1 ORDER BY name").fetchall()
-    queue_rows = conn.execute(
-        """
-        SELECT r.*, c.name AS circuit_name
-        FROM raw_activities r
-        LEFT JOIN circuits c ON c.id = r.circuit_id
-        WHERE r.review_status NOT IN ('already_logged', 'reviewed', 'imported', 'ignored')
-        ORDER BY r.imported_at DESC, r.id DESC
-        """
-    ).fetchall()
-    history_rows = conn.execute(
-        """
-        SELECT r.*, c.name AS circuit_name
-        FROM raw_activities r
-        LEFT JOIN circuits c ON c.id = r.circuit_id
-        WHERE r.review_status IN ('already_logged', 'reviewed', 'imported', 'ignored')
-        ORDER BY r.imported_at DESC, r.id DESC
-        LIMIT 30
-        """
-    ).fetchall()
+    queue_rows = review_activity_rows(conn, terminal=False)
+    history_rows = review_activity_rows(conn, terminal=True)
     return f"""
 <section class="band">
   <h2>Add Raw Activity</h2>
@@ -676,9 +712,10 @@ def render_review(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Import Activity File</h2>
-  <form class="stack" method="post" action="/review/import-file">
+  <form class="stack" method="post" action="/review/import-file" enctype="multipart/form-data">
     <label>Source<input name="source" value="strava" required></label>
-    <label>CSV, JSON, TCX, TCX.GZ, ZIP, or folder path<input name="activity_file" placeholder="export_123.zip" required></label>
+    <label>Activity file<input name="activity_upload" type="file" accept=".csv,.json,.tcx,.gz,.zip"></label>
+    <label>Folder or path<input name="activity_file" placeholder="exports/activities"></label>
     <button type="submit">Import file</button>
   </form>
 </section>
@@ -691,6 +728,41 @@ def render_review(conn: sqlite3.Connection) -> str:
   {raw_activity_table(history_rows, circuits, readonly=True)}
 </section>
 """
+
+
+def review_activity_rows(conn: sqlite3.Connection, *, terminal: bool) -> list[sqlite3.Row]:
+    status_filter = (
+        "r.review_status IN ('already_logged', 'reviewed', 'imported', 'ignored')"
+        if terminal
+        else "r.review_status NOT IN ('already_logged', 'reviewed', 'imported', 'ignored')"
+    )
+    limit = "LIMIT 30" if terminal else ""
+    return conn.execute(
+        f"""
+        WITH raw_with_resistance AS (
+            SELECT r.*, c.name AS circuit_name,
+                   COALESCE(
+                       (SELECT s.resistance FROM sprint_entries s WHERE s.raw_activity_id = r.id LIMIT 1),
+                       (SELECT l.resistance FROM lap_entries l WHERE l.raw_activity_id = r.id LIMIT 1),
+                       CASE WHEN r.duplicate_entry_type = 'sprint'
+                            THEN (SELECT s.resistance FROM sprint_entries s WHERE s.id = r.duplicate_entry_id)
+                       END,
+                       CASE WHEN r.duplicate_entry_type = 'lap'
+                            THEN (SELECT l.resistance FROM lap_entries l WHERE l.id = r.duplicate_entry_id)
+                       END,
+                       4
+                   ) AS default_resistance
+            FROM raw_activities r
+            LEFT JOIN circuits c ON c.id = r.circuit_id
+            WHERE {status_filter}
+        )
+        SELECT rr.*, rs.scaling AS default_resistance_scaling
+        FROM raw_with_resistance rr
+        LEFT JOIN resistance_scaling rs ON rs.resistance = rr.default_resistance
+        ORDER BY rr.imported_at DESC, rr.id DESC
+        {limit}
+        """
+    ).fetchall()
 
 
 def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], readonly: bool = False) -> str:
@@ -761,6 +833,11 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
     return f"""
     <div style="display:grid; gap:8px;">
       {confirm_duplicate}
+      <form method="post" action="/review/classify">
+        <input type="hidden" name="id" value="{row['id']}">
+        <input type="hidden" name="session_type" value="ignore">
+        <button class="secondary" type="submit">Ignore activity</button>
+      </form>
       <form class="stack" method="post" action="/review/classify">
         <input type="hidden" name="id" value="{row['id']}">
         <label>Type
@@ -784,8 +861,9 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
     performed_on = date_part(row["started_on"]) or ""
     duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
     raw_type = row["session_type"] if row["session_type"] in ("lap", "sprint") else "sprint"
-    rpm = payload.get("average_cadence")
-    device_watts = payload.get("average_watts")
+    rpm = step_value(payload.get("average_cadence"), 1)
+    device_watts = step_value(payload.get("average_watts"), 1)
+    resistance = row_value(row, "default_resistance", 4)
     notes = default_promotion_notes(row)
     return f"""
       <form class="stack" method="post" action="/review/promote">
@@ -797,9 +875,9 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
           </select>
         </label>
         <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
-        <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{fmt_raw(duration_minutes)}"></label>
+        <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
         <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
-        <label>Resistance<input name="resistance" type="number" min="0"></label>
+        <label>Resistance<input name="resistance" type="number" min="1" max="12" value="{fmt_raw(resistance)}" required></label>
         <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
         <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
         <label>Entry number<input name="entry_index" type="number" min="1"></label>
@@ -853,7 +931,11 @@ def source_metric_summary(row: sqlite3.Row) -> str:
         return ""
     pieces = []
     if payload.get("average_watts") is not None:
-        pieces.append(f"watts avg {fmt_num(payload.get('average_watts'), 0)} max {fmt_num(payload.get('max_watts'), 0)}")
+        scale = row_float(row, "default_resistance_scaling")
+        average_watts = scaled_number(payload.get("average_watts"), scale)
+        max_watts = scaled_number(payload.get("max_watts"), scale)
+        label = "est watts" if scale is not None else "device watts"
+        pieces.append(f"{label} avg {fmt_num(average_watts, 0)} max {fmt_num(max_watts, 0)}")
     if payload.get("average_cadence") is not None:
         pieces.append(f"rpm avg {fmt_num(payload.get('average_cadence'), 0)} max {fmt_num(payload.get('max_cadence'), 0)}")
     if payload.get("average_speed_mps") is not None:
@@ -968,6 +1050,29 @@ def best_laps_table(rows: list[dict[str, object]]) -> str:
     )
 
 
+def source_metrics_table(rows: list[dict[str, object]]) -> str:
+    return f"""<div class="table-scroll">{table(
+        ["Start", "Type", "Circuit", "Resistance", "Avg est watts", "Best 5m", "Best 60s", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
+        [
+            [
+                row["started_on"],
+                row["session_type"],
+                row["circuit"],
+                row["resistance"],
+                fmt_num(row["average_watts"], 0),
+                fmt_num(row["best_300s_watts"], 0),
+                fmt_num(row["best_60s_watts"], 0),
+                fmt_num(row["average_cadence"], 0),
+                fmt_num(row["max_cadence"], 0),
+                fmt_num(row["average_speed_mps"], 1),
+                fmt_num(row["watts_variability_pct"], 1),
+                row["data_quality_flags"],
+            ]
+            for row in rows
+        ],
+    )}</div>"""
+
+
 def table(headers: list[str], rows: list[list[object]]) -> str:
     if not rows:
         return '<div class="empty">No data yet.</div>'
@@ -977,6 +1082,24 @@ def table(headers: list[str], rows: list[list[object]]) -> str:
         for row in rows
     )
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+
+
+def grouped_table(headers: list[str], rows: list[list[object]], group_index: int = 0) -> str:
+    if not rows:
+        return '<div class="empty">No data yet.</div>'
+    head = "".join(f"<th>{escape(header)}</th>" for header in headers)
+    body = []
+    current_group = object()
+    group_class = "day-group-b"
+    for row in rows:
+        is_new_group = row[group_index] != current_group
+        if is_new_group:
+            current_group = row[group_index]
+            group_class = "day-group-a" if group_class == "day-group-b" else "day-group-b"
+        classes = f'{group_class}{" day-start" if is_new_group else ""}'
+        cells = "".join(f"<td>{escape('' if value is None else str(value))}</td>" for value in row)
+        body.append(f'<tr class="{classes}">{cells}</tr>')
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
 def metric(label: str, value: object, tone: str = "blue") -> str:
@@ -1009,6 +1132,44 @@ def line_chart(title: str, points: list[tuple[str, float | None]], color: str) -
   <polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="3"/>
   {circles}
 </svg>"""
+
+
+def source_metric_points(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
+    ordered = list(reversed(rows))
+    return [(str(row["started_on"] or row["id"]), row.get(key)) for row in ordered]
+
+
+def max_metric(rows: list[dict[str, object]], key: str) -> float | None:
+    values = []
+    for row in rows:
+        value = row.get(key)
+        if value not in (None, ""):
+            values.append(float(value))
+    return max(values) if values else None
+
+
+def row_value(row: sqlite3.Row, key: str, default: object = None) -> object:
+    return row[key] if key in row.keys() and row[key] not in (None, "") else default
+
+
+def row_float(row: sqlite3.Row, key: str) -> float | None:
+    value = row_value(row, key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def scaled_number(value: object, scale: float | None) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return None
+    return raw * scale if scale is not None else raw
 
 
 def update_circuit(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -1223,6 +1384,34 @@ def hr_for_duplicate(conn: sqlite3.Connection, duplicate: dict[str, object] | No
     return int(row["hr"])
 
 
+def populate_missing_duplicate_hr(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, duplicate_entry_type, duplicate_entry_id, duplicate_confidence, duplicate_reason
+        FROM raw_activities
+        WHERE hr IS NULL
+          AND duplicate_entry_type IS NOT NULL
+          AND duplicate_entry_id IS NOT NULL
+        """
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        duplicate = {
+            "entry_type": row["duplicate_entry_type"],
+            "entry_id": row["duplicate_entry_id"],
+            "confidence": row["duplicate_confidence"],
+            "reason": row["duplicate_reason"],
+        }
+        duplicate_hr = hr_for_duplicate(conn, duplicate)
+        if duplicate_hr is None:
+            continue
+        conn.execute("UPDATE raw_activities SET hr = ? WHERE id = ?", (duplicate_hr, row["id"]))
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
 def backfill_duplicate_started_at(
     conn: sqlite3.Connection,
     duplicate: dict[str, object],
@@ -1240,13 +1429,26 @@ def backfill_duplicate_started_at(
     return True
 
 
-def import_activity_file_to_review(conn: sqlite3.Connection, params: dict[str, str]) -> int:
-    rows = load_activity_file(required(params, "activity_file"), required(params, "source"))
+def import_activity_file_to_review(conn: sqlite3.Connection, params: dict[str, FormValue]) -> int:
+    source = required(params, "source")
+    upload = params.get("activity_upload")
+    if isinstance(upload, UploadedFile) and upload.filename and upload.content:
+        rows = load_uploaded_activity_file(upload, source)
+    else:
+        rows = load_activity_file(required(params, "activity_file"), source)
     imported = 0
     for row in rows:
         add_raw_activity(conn, row)
         imported += 1
     return imported
+
+
+def load_uploaded_activity_file(upload: UploadedFile, source: str) -> list[dict[str, str]]:
+    filename = Path(upload.filename).name or "activity_upload"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / filename
+        path.write_bytes(upload.content)
+        return load_activity_file(path, source)
 
 
 def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -1270,7 +1472,7 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     )
     if duplicate:
         suggestion = suggestion_for_duplicate(suggestion, duplicate)
-    if duplicate and hr is None and float(duplicate["confidence"]) >= STRONG_DUPLICATE_THRESHOLD:
+    if duplicate and hr is None:
         hr = hr_for_duplicate(conn, duplicate)
     review_status = review_status_for_activity(duplicate, hr)
     cursor = conn.execute(
@@ -1349,7 +1551,7 @@ def enrich_existing_raw_activity(
             "confidence": row["duplicate_confidence"],
             "reason": row["duplicate_reason"],
         }
-    if hr is None and existing_duplicate and (row["duplicate_confidence"] or 0) >= STRONG_DUPLICATE_THRESHOLD:
+    if hr is None and existing_duplicate:
         hr = hr_for_duplicate(conn, existing_duplicate)
     conn.execute(
         """
@@ -1462,6 +1664,10 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     if hr is None:
         raise ValueError("HR is required to import an activity.")
     resistance = maybe_int(params.get("resistance"))
+    if resistance is None:
+        resistance = 4
+    if resistance < 1 or resistance > 12:
+        raise ValueError("Resistance must be between 1 and 12.")
     rpm = maybe_float(params.get("rpm"))
     if rpm is None:
         rpm = maybe_float(str(payload.get("average_cadence"))) if payload.get("average_cadence") is not None else None
@@ -1868,6 +2074,15 @@ def fmt_raw(value: object) -> str:
         return str(value)
 
 
+def step_value(value: object, digits: int) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def signed_num(value: object, digits: int = 1) -> str:
     if value is None:
         return ""
@@ -1983,15 +2198,46 @@ def maybe_int(value: str | None) -> int | None:
     return int(float(value))
 
 
-def required(params: dict[str, str], key: str) -> str:
+def parse_post_params(content_type: str, body: bytes) -> dict[str, FormValue]:
+    if content_type.lower().startswith("multipart/form-data"):
+        return parse_multipart_params(content_type, body)
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return {key: values[-1] for key, values in parsed.items()}
+
+
+def parse_multipart_params(content_type: str, body: bytes) -> dict[str, FormValue]:
+    headers = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    message = BytesParser(policy=policy.default).parsebytes(headers + body)
+    if not message.is_multipart():
+        return {}
+    params: dict[str, FormValue] = {}
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename is not None:
+            params[name] = UploadedFile(Path(filename).name, payload)
+        else:
+            charset = part.get_content_charset() or "utf-8"
+            params[name] = payload.decode(charset, errors="replace")
+    return params
+
+
+def required(params: dict[str, FormValue], key: str) -> str:
     value = empty_to_none(params.get(key))
     if value is None:
         raise ValueError(f"{key} is required.")
     return value
 
 
-def empty_to_none(value: str | None) -> str | None:
+def empty_to_none(value: FormValue | None) -> str | None:
     if value is None:
+        return None
+    if isinstance(value, UploadedFile):
         return None
     cleaned = value.strip()
     return cleaned or None

@@ -12,6 +12,8 @@ from typing import Any
 import xml.etree.ElementTree as ET
 import zipfile
 
+from .activity_metrics import ActivitySample, analyse_activity_samples, parse_activity_time
+
 
 SUPPORTED_SUFFIXES = {".csv", ".json", ".tcx", ".tcx.gz", ".zip"}
 
@@ -171,11 +173,8 @@ def _load_tcx_root(root: ET.Element, fallback_title: str, source: str) -> list[d
         duration = sum(_float(_child_text(lap, "TotalTimeSeconds")) or 0 for lap in laps)
         distance_m = sum(_float(_child_text(lap, "DistanceMeters")) or 0 for lap in laps)
         calories = sum(_float(_child_text(lap, "Calories")) or 0 for lap in laps)
-        cadence_values = [_float(_text(node)) for node in activity.iter() if _tag_name(node) == "Cadence"]
-        watts_values = [_float(_text(node)) for node in activity.iter() if _tag_name(node) == "Watts"]
-        speed_values = [_float(_text(node)) for node in activity.iter() if _tag_name(node) == "Speed"]
-        hr_values = [_float(_child_text(node, "Value")) for node in activity.iter() if _tag_name(node) == "HeartRateBpm"]
-        trackpoint_count = sum(1 for node in activity.iter() if _tag_name(node) == "Trackpoint")
+        samples = _trackpoint_samples(activity)
+        analysis = analyse_activity_samples(samples, duration_seconds=duration if duration else None)
         row: dict[str, Any] = {
             "source": source,
             "source_activity_id": activity_id or fallback_title,
@@ -183,22 +182,43 @@ def _load_tcx_root(root: ET.Element, fallback_title: str, source: str) -> list[d
             "started_on": _start_time(activity, laps, activity_id),
             "duration_seconds": duration if duration else None,
             "raw_distance": distance_m / 1000 if distance_m else None,
-            "hr": _average(hr_values),
+            "hr": analysis.get("average_source_hr"),
             "raw_payload": json.dumps(
                 {
                     "format": "tcx",
                     "sport": activity.attrib.get("Sport"),
-                    "trackpoint_count": trackpoint_count,
+                    "trackpoint_count": len(samples),
                     "calories": calories or None,
-                    **_metric_summary("cadence", cadence_values),
-                    **_metric_summary("watts", watts_values),
-                    **_metric_summary("speed_mps", speed_values),
+                    **analysis,
                 },
                 sort_keys=True,
             ),
         }
         rows.append(row)
     return rows
+
+
+def _trackpoint_samples(activity: ET.Element) -> list[ActivitySample]:
+    trackpoints = [node for node in activity.iter() if _tag_name(node) == "Trackpoint"]
+    parsed_times = [parse_activity_time(_child_text(trackpoint, "Time")) for trackpoint in trackpoints]
+    base_time = next((parsed for parsed in parsed_times if parsed is not None), None)
+    samples = []
+    for index, trackpoint in enumerate(trackpoints):
+        parsed_time = parsed_times[index]
+        if parsed_time is not None and base_time is not None:
+            elapsed_seconds = (parsed_time - base_time).total_seconds()
+        else:
+            elapsed_seconds = float(index)
+        samples.append(
+            ActivitySample(
+                elapsed_seconds=elapsed_seconds,
+                watts=_float(_descendant_text(trackpoint, "Watts")),
+                cadence=_float(_child_text(trackpoint, "Cadence")),
+                speed_mps=_float(_descendant_text(trackpoint, "Speed")),
+                hr=_float(_descendant_text(trackpoint, "HeartRateBpmValue")),
+            )
+        )
+    return samples
 
 
 def _load_zip(path: Path, source: str) -> list[dict[str, Any]]:
@@ -451,6 +471,18 @@ def _child_text(node: ET.Element, name: str) -> str | None:
 
 def _text(node: ET.Element) -> str | None:
     return node.text.strip() if node.text else None
+
+
+def _descendant_text(node: ET.Element, name: str) -> str | None:
+    if name == "HeartRateBpmValue":
+        for child in node.iter():
+            if _tag_name(child) == "HeartRateBpm":
+                return _child_text(child, "Value")
+        return None
+    for child in node.iter():
+        if child is not node and _tag_name(child) == name:
+            return _text(child)
+    return None
 
 
 def _tag_name(node: ET.Element) -> str:

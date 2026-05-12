@@ -18,7 +18,12 @@ from workout_tracker.web import (
     add_circuit,
     confirm_duplicate_activity,
     find_activity_duplicate,
+    grouped_table,
     import_activity_file_to_review,
+    parse_post_params,
+    populate_missing_duplicate_hr,
+    review_actions,
+    promote_activity_form,
     promote_raw_activity,
     raw_activity_has_entry,
     classify_activity,
@@ -26,6 +31,7 @@ from workout_tracker.web import (
     update_calibration_profile,
     update_mass_log,
     update_resistance_scaling,
+    UploadedFile,
 )
 
 
@@ -295,6 +301,7 @@ class WebActionTests(unittest.TestCase):
                 "performed_on": "2026-05-06",
                 "duration_minutes": "20",
                 "device_distance": "8",
+                "hr": "129",
                 "resistance": "4",
             },
         )
@@ -313,7 +320,50 @@ class WebActionTests(unittest.TestCase):
         raw = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("possible",)).fetchone()
         sprint = self.conn.execute("SELECT started_at FROM sprint_entries WHERE performed_on = ?", ("2026-05-06",)).fetchone()
         self.assertEqual(raw["review_status"], "possible_duplicate")
+        self.assertEqual(raw["hr"], 129)
         self.assertIsNone(sprint["started_at"])
+
+    def test_populate_missing_duplicate_hr_updates_existing_review_rows(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-06",
+                "duration_minutes": "20",
+                "device_distance": "8",
+                "hr": "134",
+            },
+        )
+        sprint_id = self.conn.execute("SELECT id FROM sprint_entries WHERE performed_on = ?", ("2026-05-06",)).fetchone()["id"]
+        self.conn.execute(
+            """
+            INSERT INTO raw_activities (
+                source, source_activity_id, started_on, duration_seconds, raw_distance,
+                review_status, session_type, duplicate_entry_type, duplicate_entry_id,
+                duplicate_confidence, duplicate_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "strava",
+                "existing-missing-hr",
+                "2026-05-06T06:15",
+                300,
+                8,
+                "possible_duplicate",
+                "sprint",
+                "sprint",
+                sprint_id,
+                0.65,
+                "same date",
+            ),
+        )
+        self.conn.commit()
+
+        updated = populate_missing_duplicate_hr(self.conn)
+
+        raw = self.conn.execute("SELECT hr FROM raw_activities WHERE source_activity_id = ?", ("existing-missing-hr",)).fetchone()
+        self.assertEqual(updated, 1)
+        self.assertEqual(raw["hr"], 134)
 
     def test_confirm_duplicate_backfills_possible_match(self):
         add_sprint_entry(
@@ -536,6 +586,78 @@ class WebActionTests(unittest.TestCase):
         self.assertAlmostEqual(sprint["rpm"], 119.5)
         self.assertAlmostEqual(sprint["device_watts"], 287.25)
 
+    def test_promote_activity_form_rounds_source_defaults_to_input_step(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "payload-form",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "4502",
+                "raw_distance": "8",
+                "raw_payload": json.dumps({"average_cadence": 132.321, "average_watts": 347.654}),
+            },
+        )
+        row = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("payload-form",)).fetchone()
+
+        html = promote_activity_form(row, '<option value="">No circuit</option>')
+
+        self.assertIn('name="rpm" type="number" step="0.1" min="0" value="132.3"', html)
+        self.assertIn('name="device_watts" type="number" step="0.1" min="0" value="347.7"', html)
+        self.assertIn('name="duration_minutes" type="number" step="0.001" min="0" value="75.033"', html)
+        self.assertIn('name="resistance" type="number" min="1" max="12" value="4" required', html)
+
+    def test_promote_raw_activity_defaults_missing_resistance_to_four(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "default-resistance",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+                "hr": "128",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("default-resistance",)).fetchone()["id"]
+
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "sprint",
+                "performed_on": "2026-05-10",
+                "hr": "128",
+            },
+        )
+
+        sprint = self.conn.execute("SELECT resistance FROM sprint_entries WHERE raw_activity_id = ?", (raw_id,)).fetchone()
+        self.assertEqual(sprint["resistance"], 4)
+
+    def test_review_actions_include_explicit_ignore_button(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "noise",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "5",
+                "raw_distance": "0.01",
+            },
+        )
+        row = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("noise",)).fetchone()
+
+        html = review_actions(row, '<option value="">No circuit</option>')
+
+        self.assertIn('name="session_type" value="ignore"', html)
+        self.assertIn("Ignore activity", html)
+
+    def test_grouped_table_marks_day_groups(self):
+        html = grouped_table(["Date", "Value"], [["2026-05-10", 1], ["2026-05-10", 2], ["2026-05-11", 3]])
+
+        self.assertIn("day-group-a day-start", html)
+        self.assertIn("day-group-b day-start", html)
+
     def test_promote_raw_activity_imports_lap_with_circuit_and_hr(self):
         add_raw_activity(
             self.conn,
@@ -653,6 +775,51 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(duplicate["review_status"], "already_logged")
         self.assertEqual(duplicate["duplicate_entry_type"], "sprint")
         self.assertEqual(new["review_status"], "needs_hr")
+
+    def test_import_activity_file_to_review_accepts_uploaded_file(self):
+        upload = UploadedFile(
+            "activities.csv",
+            (
+                "Activity ID,Activity Name,Activity Date,Elapsed Time,Distance\n"
+                "uploaded,Uploaded ride,2026-05-15T06:15:00,300,12\n"
+            ).encode("utf-8"),
+        )
+
+        imported = import_activity_file_to_review(
+            self.conn,
+            {"source": "strava", "activity_upload": upload, "activity_file": ""},
+        )
+
+        raw = self.conn.execute(
+            "SELECT title, review_status FROM raw_activities WHERE source_activity_id = ?",
+            ("uploaded",),
+        ).fetchone()
+        self.assertEqual(imported, 1)
+        self.assertEqual(raw["title"], "Uploaded ride")
+        self.assertEqual(raw["review_status"], "needs_hr")
+
+    def test_parse_post_params_extracts_multipart_upload(self):
+        boundary = "----test-boundary"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="source"\r\n\r\n'
+            "strava\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="activity_upload"; filename="activities.csv"\r\n'
+            "Content-Type: text/csv\r\n\r\n"
+            "Activity ID,Activity Date,Elapsed Time,Distance\r\n"
+            "abc,2026-05-15T06:15:00,300,12\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+
+        params = parse_post_params(f"multipart/form-data; boundary={boundary}", body)
+
+        self.assertEqual(params["source"], "strava")
+        self.assertIsInstance(params["activity_upload"], UploadedFile)
+        upload = params["activity_upload"]
+        assert isinstance(upload, UploadedFile)
+        self.assertEqual(upload.filename, "activities.csv")
+        self.assertIn(b"Activity ID", upload.content)
 
 
 if __name__ == "__main__":
