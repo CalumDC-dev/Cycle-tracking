@@ -4,3 +4,10 @@ __pycache__/
 Workout tracking.xlsx
 data/
 exports/
+*.tcx
+*.fit
+*.gpx
+*.tcx.gz
+*.fit.gz
+*.gpx.gz
+export_*.zip

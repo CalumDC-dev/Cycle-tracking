@@ -26,6 +26,20 @@ CREATE TABLE IF NOT EXISTS resistance_scaling (
     scaling REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS resistance_calibration_tests (
+    id INTEGER PRIMARY KEY,
+    tested_on TEXT NOT NULL,
+    resistance INTEGER NOT NULL,
+    duration_minutes REAL,
+    device_watts REAL NOT NULL,
+    expected_watts REAL NOT NULL,
+    hr INTEGER,
+    mass_kg REAL,
+    calculated_scaling REAL NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS met_lookup (
     id INTEGER PRIMARY KEY,
     hr_from INTEGER NOT NULL UNIQUE,
@@ -55,6 +69,7 @@ CREATE TABLE IF NOT EXISTS raw_activities (
     started_on TEXT,
     duration_seconds INTEGER,
     raw_distance REAL,
+    hr INTEGER,
     raw_payload TEXT,
     review_status TEXT NOT NULL DEFAULT 'needs_review',
     session_type TEXT NOT NULL DEFAULT 'unknown',
@@ -62,6 +77,10 @@ CREATE TABLE IF NOT EXISTS raw_activities (
     calibration_profile_id INTEGER REFERENCES calibration_profiles(id),
     classification_confidence REAL,
     classification_reason TEXT,
+    duplicate_entry_type TEXT,
+    duplicate_entry_id INTEGER,
+    duplicate_confidence REAL,
+    duplicate_reason TEXT,
     imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source, source_activity_id)
 );
@@ -69,6 +88,7 @@ CREATE TABLE IF NOT EXISTS raw_activities (
 CREATE TABLE IF NOT EXISTS sprint_entries (
     id INTEGER PRIMARY KEY,
     performed_on TEXT NOT NULL,
+    started_at TEXT,
     day_number INTEGER,
     sprint_index INTEGER,
     duration_minutes REAL,
@@ -84,6 +104,7 @@ CREATE TABLE IF NOT EXISTS sprint_entries (
 CREATE TABLE IF NOT EXISTS lap_entries (
     id INTEGER PRIMARY KEY,
     performed_on TEXT NOT NULL,
+    started_at TEXT,
     lap_index INTEGER,
     circuit_id INTEGER REFERENCES circuits(id),
     lap_time_minutes REAL,
@@ -102,6 +123,10 @@ CREATE TABLE IF NOT EXISTS import_log (
     lap_rows INTEGER NOT NULL DEFAULT 0,
     circuit_rows INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_sprint_entries_performed_on ON sprint_entries(performed_on);
+CREATE INDEX IF NOT EXISTS idx_lap_entries_performed_on ON lap_entries(performed_on);
+CREATE INDEX IF NOT EXISTS idx_raw_activities_review_status ON raw_activities(review_status);
 """
 
 
@@ -116,6 +141,7 @@ def connect(db_path: Path | str = DEFAULT_DB) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _apply_migrations(conn)
     conn.commit()
 
 
@@ -128,6 +154,7 @@ def reset_db(conn: sqlite3.Connection) -> None:
         "circuits",
         "mass_log",
         "met_lookup",
+        "resistance_calibration_tests",
         "resistance_scaling",
         "calibration_profiles",
     ]
@@ -137,3 +164,18 @@ def reset_db(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     init_db(conn)
 
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    _ensure_column(conn, "sprint_entries", "started_at", "TEXT")
+    _ensure_column(conn, "lap_entries", "started_at", "TEXT")
+    _ensure_column(conn, "raw_activities", "hr", "INTEGER")
+    _ensure_column(conn, "raw_activities", "duplicate_entry_type", "TEXT")
+    _ensure_column(conn, "raw_activities", "duplicate_entry_id", "INTEGER")
+    _ensure_column(conn, "raw_activities", "duplicate_confidence", "REAL")
+    _ensure_column(conn, "raw_activities", "duplicate_reason", "TEXT")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
