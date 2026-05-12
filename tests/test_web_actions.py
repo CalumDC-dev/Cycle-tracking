@@ -15,6 +15,9 @@ from workout_tracker.web import (
     add_circuit,
     confirm_duplicate_activity,
     find_activity_duplicate,
+    promote_raw_activity,
+    raw_activity_has_entry,
+    classify_activity,
     update_circuit,
     update_calibration_profile,
     update_mass_log,
@@ -372,6 +375,155 @@ class WebActionTests(unittest.TestCase):
         assert duplicate is not None
         self.assertEqual(duplicate["entry_type"], "lap")
         self.assertGreaterEqual(duplicate["confidence"], 0.85)
+
+    def test_classify_activity_keeps_activity_available_for_import(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "classify-me",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "4",
+                "hr": "122",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("classify-me",)).fetchone()["id"]
+
+        classify_activity(self.conn, {"id": str(raw_id), "session_type": "lap", "circuit_id": "1"})
+
+        raw = self.conn.execute("SELECT review_status, session_type, circuit_id FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+        self.assertEqual(raw["review_status"], "ready_to_import")
+        self.assertEqual(raw["session_type"], "lap")
+        self.assertEqual(raw["circuit_id"], 1)
+
+    def test_promote_raw_activity_imports_sprint_and_stores_manual_hr(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "new-sprint",
+                "title": "Kinomap free-ride",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("new-sprint",)).fetchone()["id"]
+
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "sprint",
+                "performed_on": "2026-05-10",
+                "duration_minutes": "5",
+                "hr": "128",
+                "resistance": "4",
+                "rpm": "116",
+                "device_watts": "260",
+                "entry_index": "2",
+                "notes": "watch HR",
+            },
+        )
+
+        sprint = self.conn.execute("SELECT * FROM sprint_entries WHERE raw_activity_id = ?", (raw_id,)).fetchone()
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+        self.assertEqual(raw["review_status"], "imported")
+        self.assertEqual(raw["hr"], 128)
+        self.assertEqual(raw["session_type"], "sprint")
+        self.assertEqual(sprint["performed_on"], "2026-05-10")
+        self.assertEqual(sprint["started_at"], "2026-05-10T06:15")
+        self.assertEqual(sprint["sprint_index"], 2)
+        self.assertAlmostEqual(sprint["duration_minutes"], 5.0)
+        self.assertEqual(sprint["hr"], 128)
+        self.assertEqual(sprint["resistance"], 4)
+        self.assertAlmostEqual(sprint["rpm"], 116.0)
+        self.assertAlmostEqual(sprint["device_watts"], 260.0)
+        self.assertAlmostEqual(sprint["device_distance"], 8.0)
+        self.assertTrue(raw_activity_has_entry(self.conn, raw_id))
+
+    def test_promote_raw_activity_imports_lap_with_circuit_and_hr(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "new-lap",
+                "started_on": "2026-05-11T06:15",
+                "duration_seconds": "240",
+                "raw_distance": "4",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("new-lap",)).fetchone()["id"]
+
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "lap",
+                "performed_on": "2026-05-11",
+                "duration_minutes": "4",
+                "hr": "132",
+                "resistance": "4",
+                "rpm": "108",
+                "entry_index": "1",
+                "circuit_id": "1",
+            },
+        )
+
+        lap = self.conn.execute("SELECT * FROM lap_entries WHERE raw_activity_id = ?", (raw_id,)).fetchone()
+        raw = self.conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+        self.assertEqual(raw["review_status"], "imported")
+        self.assertEqual(raw["session_type"], "lap")
+        self.assertEqual(raw["circuit_id"], 1)
+        self.assertEqual(lap["started_at"], "2026-05-11T06:15")
+        self.assertEqual(lap["lap_index"], 1)
+        self.assertEqual(lap["circuit_id"], 1)
+        self.assertAlmostEqual(lap["lap_time_minutes"], 4.0)
+        self.assertEqual(lap["hr"], 132)
+
+    def test_promote_raw_activity_requires_hr_and_prevents_double_import(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "needs-hr-import",
+                "started_on": "2026-05-12T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "8",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("needs-hr-import",)).fetchone()["id"]
+
+        with self.assertRaises(ValueError):
+            promote_raw_activity(
+                self.conn,
+                {
+                    "id": str(raw_id),
+                    "session_type": "sprint",
+                    "performed_on": "2026-05-12",
+                },
+            )
+
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "sprint",
+                "performed_on": "2026-05-12",
+                "hr": "126",
+            },
+        )
+        with self.assertRaises(ValueError):
+            promote_raw_activity(
+                self.conn,
+                {
+                    "id": str(raw_id),
+                    "session_type": "sprint",
+                    "performed_on": "2026-05-12",
+                    "hr": "126",
+                },
+            )
 
 
 if __name__ == "__main__":

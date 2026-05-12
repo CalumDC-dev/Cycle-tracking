@@ -274,6 +274,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/confirm-duplicate":
                 confirm_duplicate_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/review/promote":
+                promote_raw_activity(conn, params)
+                self._redirect("/review")
             elif parsed.path == "/entries/sprint/add":
                 add_sprint_entry(conn, params)
                 self._redirect("/entries")
@@ -638,7 +641,7 @@ def render_review(conn: sqlite3.Connection) -> str:
         SELECT r.*, c.name AS circuit_name
         FROM raw_activities r
         LEFT JOIN circuits c ON c.id = r.circuit_id
-        WHERE r.review_status NOT IN ('already_logged', 'reviewed', 'ignored')
+        WHERE r.review_status NOT IN ('already_logged', 'reviewed', 'imported', 'ignored')
         ORDER BY r.imported_at DESC, r.id DESC
         """
     ).fetchall()
@@ -647,7 +650,7 @@ def render_review(conn: sqlite3.Connection) -> str:
         SELECT r.*, c.name AS circuit_name
         FROM raw_activities r
         LEFT JOIN circuits c ON c.id = r.circuit_id
-        WHERE r.review_status IN ('already_logged', 'reviewed', 'ignored')
+        WHERE r.review_status IN ('already_logged', 'reviewed', 'imported', 'ignored')
         ORDER BY r.imported_at DESC, r.id DESC
         LIMIT 30
         """
@@ -713,6 +716,8 @@ def review_status_label(row: sqlite3.Row) -> str:
         "possible_duplicate": "Possible duplicate",
         "needs_hr": "Needs HR",
         "needs_review": "Needs review",
+        "ready_to_import": "Ready to import",
+        "imported": "Imported",
         "reviewed": "Reviewed",
         "ignored": "Ignored",
     }.get(status, status.replace("_", " ").title())
@@ -739,6 +744,7 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
         <input type="hidden" name="id" value="{row['id']}">
         <button class="secondary" type="submit">Confirm duplicate</button>
       </form>"""
+    promote_form = promote_activity_form(row, circuit_options)
     return f"""
     <div style="display:grid; gap:8px;">
       {confirm_duplicate}
@@ -756,7 +762,44 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
         <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
         <button type="submit">Confirm</button>
       </form>
+      {promote_form}
     </div>"""
+
+
+def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
+    performed_on = date_part(row["started_on"]) or ""
+    duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
+    raw_type = row["session_type"] if row["session_type"] in ("lap", "sprint") else "sprint"
+    notes = default_promotion_notes(row)
+    return f"""
+      <form class="stack" method="post" action="/review/promote">
+        <input type="hidden" name="id" value="{row['id']}">
+        <label>Import as
+          <select name="session_type">
+            {select_option('sprint', raw_type)}
+            {select_option('lap', raw_type)}
+          </select>
+        </label>
+        <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
+        <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{fmt_raw(duration_minutes)}"></label>
+        <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
+        <label>Resistance<input name="resistance" type="number" min="0"></label>
+        <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
+        <label>Device watts<input name="device_watts" type="number" step="0.1" min="0"></label>
+        <label>Entry number<input name="entry_index" type="number" min="1"></label>
+        <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
+        <label>Notes<input name="notes" value="{escape(notes)}"></label>
+        <button type="submit">Import entry</button>
+      </form>"""
+
+
+def default_promotion_notes(row: sqlite3.Row) -> str:
+    pieces = [f"Imported from {row['source']}"]
+    if row["source_activity_id"]:
+        pieces.append(str(row["source_activity_id"]))
+    if row["title"]:
+        pieces.append(str(row["title"]))
+    return " - ".join(pieces)
 
 
 def resistance_factor_row(row: dict[str, object]) -> str:
@@ -1179,7 +1222,12 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
 def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     session_type = params["session_type"]
     circuit_id = maybe_int(params.get("circuit_id")) if session_type == "lap" else None
-    review_status = "ignored" if session_type == "ignore" else "reviewed"
+    if session_type == "ignore":
+        review_status = "ignored"
+    elif session_type in ("lap", "sprint"):
+        review_status = "ready_to_import"
+    else:
+        review_status = "needs_review"
     conn.execute(
         """
         UPDATE raw_activities
@@ -1222,6 +1270,119 @@ def confirm_duplicate_activity(conn: sqlite3.Connection, params: dict[str, str])
         (reason, row["id"]),
     )
     conn.commit()
+
+
+def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    raw_id = int(required(params, "id"))
+    row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+    if row is None:
+        raise ValueError("Raw activity was not found.")
+    if row["review_status"] in ("already_logged", "imported"):
+        raise ValueError("Raw activity has already been handled.")
+    if raw_activity_has_entry(conn, raw_id):
+        raise ValueError("Raw activity is already linked to an entry.")
+
+    session_type = required(params, "session_type")
+    if session_type not in ("sprint", "lap"):
+        raise ValueError("Raw activity can only be imported as sprint or lap.")
+    performed_on = empty_to_none(params.get("performed_on")) or date_part(row["started_on"])
+    if performed_on is None:
+        raise ValueError("Date is required to import an activity.")
+    started_at = normalize_datetime(row["started_on"]) if has_time_component(row["started_on"]) else None
+    duration_minutes = maybe_float(params.get("duration_minutes"))
+    if duration_minutes is None:
+        duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
+    hr = maybe_int(params.get("hr"))
+    if hr is None:
+        hr = row["hr"]
+    if hr is None:
+        raise ValueError("HR is required to import an activity.")
+    resistance = maybe_int(params.get("resistance"))
+    rpm = maybe_float(params.get("rpm"))
+    entry_index = maybe_int(params.get("entry_index"))
+    notes = empty_to_none(params.get("notes"))
+
+    if session_type == "lap":
+        circuit_id = maybe_int(params.get("circuit_id")) or row["circuit_id"]
+        if circuit_id is None:
+            raise ValueError("Circuit is required to import a lap activity.")
+        cursor = conn.execute(
+            """
+            INSERT INTO lap_entries (
+                performed_on, started_at, lap_index, circuit_id, lap_time_minutes,
+                hr, resistance, rpm, raw_activity_id, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                performed_on,
+                started_at,
+                entry_index,
+                circuit_id,
+                duration_minutes,
+                hr,
+                resistance,
+                rpm,
+                raw_id,
+                notes,
+            ),
+        )
+        entry_id = cursor.lastrowid
+        circuit_for_raw = circuit_id
+    else:
+        cursor = conn.execute(
+            """
+            INSERT INTO sprint_entries (
+                performed_on, started_at, sprint_index, duration_minutes,
+                rpm, device_watts, hr, resistance, device_distance, raw_activity_id, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                performed_on,
+                started_at,
+                entry_index,
+                duration_minutes,
+                rpm,
+                maybe_float(params.get("device_watts")),
+                hr,
+                resistance,
+                row["raw_distance"],
+                raw_id,
+                notes,
+            ),
+        )
+        entry_id = cursor.lastrowid
+        circuit_for_raw = None
+
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET review_status = 'imported',
+            session_type = ?,
+            circuit_id = ?,
+            hr = ?,
+            classification_confidence = 1,
+            classification_reason = ?
+        WHERE id = ?
+        """,
+        (
+            session_type,
+            circuit_for_raw,
+            hr,
+            f"Imported as {session_type} entry #{entry_id}",
+            raw_id,
+        ),
+    )
+    conn.commit()
+
+
+def raw_activity_has_entry(conn: sqlite3.Connection, raw_id: int) -> bool:
+    sprint = conn.execute("SELECT id FROM sprint_entries WHERE raw_activity_id = ? LIMIT 1", (raw_id,)).fetchone()
+    if sprint is not None:
+        return True
+    lap = conn.execute("SELECT id FROM lap_entries WHERE raw_activity_id = ? LIMIT 1", (raw_id,)).fetchone()
+    return lap is not None
 
 
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -1555,6 +1716,12 @@ def fmt_minutes(value: object) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def duration_seconds_to_minutes(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value) / 60
 
 
 def fmt_start_time(value: object) -> str:
