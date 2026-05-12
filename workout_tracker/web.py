@@ -638,7 +638,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
                         min_value="0",
                     ),
                     readonly_cell(fmt_num(sprint.calibrated_distance, 2)),
-                    readonly_cell(fmt_num(sprint.calories_watts, 1)),
+                    readonly_cell(fmt_num(sprint.calories_mets, 1)),
                     save_button(form_id),
                 ],
             )
@@ -656,7 +656,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
             "Resistance",
             "Device distance",
             "Cal distance",
-            "Calories",
+            "Calories (HR/MET)",
             "",
         ],
         rows,
@@ -696,7 +696,7 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
             )
         )
     return "".join(forms) + grouped_html_table(
-        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories", ""],
+        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories (HR/MET)", ""],
         rows,
     )
 
@@ -1121,7 +1121,7 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
 
 def daily_table(rows: list[dict[str, object]]) -> str:
     return table(
-        ["Date", "Sprints", "Laps", "Calories", "Time", "Avg watts", "Avg RPM", "Lap distance", "Total distance"],
+        ["Date", "Sprints", "Laps", "Calories (HR/MET)", "Time", "Avg watts", "Avg RPM", "Lap distance", "Total distance"],
         [
             [
                 row["date"],

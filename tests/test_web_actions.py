@@ -217,6 +217,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('/entries/lap/update', html)
         self.assertIn('name="sprint_index"', html)
         self.assertIn('name="lap_index"', html)
+        self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):

@@ -231,7 +231,7 @@ def daily_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         day = days[sprint.performed_on]
         day["date"] = sprint.performed_on
         day["sprint_count"] += 1
-        day["sprint_calories"] += sprint.calories_watts or 0
+        day["sprint_calories"] += sprint.calories_mets or 0
         day["sprint_minutes"] += sprint.duration_minutes or 0
         day["sprint_device_distance"] += sprint.device_distance or 0
         day["sprint_calibrated_distance"] += sprint.calibrated_distance or 0
