@@ -21,5 +21,6 @@ Then open `http://127.0.0.1:8000`.
 - Sprint and lap entries can be added manually from the local web UI.
 - Calibration constants, resistance scaling factors, calibration tests, and mass records can be edited from the local web UI.
 - Strava/Kinomap import can later write into `raw_activities`; the review screen separates new items, possible duplicates, missing-HR items, and already logged history.
+- Reviewed raw activities can be imported into sprint or lap entries from the local UI, with manual HR captured before promotion.
 - Calculated metrics are generated from the database, not stored as spreadsheet formulas.
 - `Workout tracking.xlsx` is intentionally ignored by Git because it contains personal source data.
