@@ -8,8 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import json
 import sqlite3
 
+from .activity_import import load_activity_file
 from .calculations import (
     calculated_laps,
     calculated_sprints,
@@ -267,6 +269,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
                 self._redirect("/circuits")
             elif parsed.path == "/review/add":
                 add_raw_activity(conn, params)
+                self._redirect("/review")
+            elif parsed.path == "/review/import-file":
+                import_activity_file_to_review(conn, params)
                 self._redirect("/review")
             elif parsed.path == "/review/classify":
                 classify_activity(conn, params)
@@ -670,6 +675,14 @@ def render_review(conn: sqlite3.Connection) -> str:
   </form>
 </section>
 <section class="band">
+  <h2>Import Activity File</h2>
+  <form class="stack" method="post" action="/review/import-file">
+    <label>Source<input name="source" value="strava" required></label>
+    <label>CSV, JSON, TCX, TCX.GZ, ZIP, or folder path<input name="activity_file" placeholder="export_123.zip" required></label>
+    <button type="submit">Import file</button>
+  </form>
+</section>
+<section class="band">
   <h2>Review Queue</h2>
   {raw_activity_table(queue_rows, circuits)}
 </section>
@@ -696,7 +709,7 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], rea
   <td>{escape(str(row['source']))}</td>
   <td>{escape(str(row['title'] or ''))}</td>
   <td>{escape(str(row['started_on'] or ''))}</td>
-  <td>{fmt_num(row['raw_distance'], 3)}</td>
+  <td>{fmt_num(row['raw_distance'], 3)}<br><span class="muted">{source_metric_summary(row)}</span></td>
   <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
   <td>{duplicate_match_label(row)}</td>
   <td>{'' if readonly else review_actions(row, options)}</td>
@@ -767,9 +780,12 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
 
 
 def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
+    payload = raw_payload_dict(row)
     performed_on = date_part(row["started_on"]) or ""
     duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
     raw_type = row["session_type"] if row["session_type"] in ("lap", "sprint") else "sprint"
+    rpm = payload.get("average_cadence")
+    device_watts = payload.get("average_watts")
     notes = default_promotion_notes(row)
     return f"""
       <form class="stack" method="post" action="/review/promote">
@@ -784,8 +800,8 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
         <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{fmt_raw(duration_minutes)}"></label>
         <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
         <label>Resistance<input name="resistance" type="number" min="0"></label>
-        <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
-        <label>Device watts<input name="device_watts" type="number" step="0.1" min="0"></label>
+        <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
+        <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
         <label>Entry number<input name="entry_index" type="number" min="1"></label>
         <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
         <label>Notes<input name="notes" value="{escape(notes)}"></label>
@@ -800,6 +816,51 @@ def default_promotion_notes(row: sqlite3.Row) -> str:
     if row["title"]:
         pieces.append(str(row["title"]))
     return " - ".join(pieces)
+
+
+def raw_payload_dict(row: sqlite3.Row) -> dict[str, object]:
+    if not row["raw_payload"]:
+        return {}
+    try:
+        payload = json.loads(row["raw_payload"])
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def merge_raw_payload(existing_payload: object, incoming_payload: object) -> str | None:
+    if incoming_payload in (None, ""):
+        return str(existing_payload) if existing_payload not in (None, "") else None
+    if existing_payload in (None, ""):
+        return str(incoming_payload)
+    try:
+        existing = json.loads(str(existing_payload))
+    except (TypeError, ValueError):
+        existing = {}
+    try:
+        incoming = json.loads(str(incoming_payload))
+    except (TypeError, ValueError):
+        incoming = {}
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return str(incoming_payload)
+    merged = {**existing, **incoming}
+    return json.dumps(merged, sort_keys=True)
+
+
+def source_metric_summary(row: sqlite3.Row) -> str:
+    payload = raw_payload_dict(row)
+    if not payload:
+        return ""
+    pieces = []
+    if payload.get("average_watts") is not None:
+        pieces.append(f"watts avg {fmt_num(payload.get('average_watts'), 0)} max {fmt_num(payload.get('max_watts'), 0)}")
+    if payload.get("average_cadence") is not None:
+        pieces.append(f"rpm avg {fmt_num(payload.get('average_cadence'), 0)} max {fmt_num(payload.get('max_cadence'), 0)}")
+    if payload.get("average_speed_mps") is not None:
+        pieces.append(f"speed avg {fmt_num(payload.get('average_speed_mps'), 1)} m/s")
+    if payload.get("calories") is not None:
+        pieces.append(f"source calories {fmt_num(payload.get('calories'), 0)}")
+    return escape("; ".join(pieces))
 
 
 def resistance_factor_row(row: dict[str, object]) -> str:
@@ -1150,6 +1211,18 @@ def review_status_for_activity(duplicate: dict[str, object] | None, hr: int | No
     return "needs_review"
 
 
+def hr_for_duplicate(conn: sqlite3.Connection, duplicate: dict[str, object] | None) -> int | None:
+    if not duplicate:
+        return None
+    table = {"sprint": "sprint_entries", "lap": "lap_entries"}.get(str(duplicate["entry_type"]))
+    if table is None:
+        return None
+    row = conn.execute(f"SELECT hr FROM {table} WHERE id = ?", (int(duplicate["entry_id"]),)).fetchone()
+    if row is None or row["hr"] is None:
+        return None
+    return int(row["hr"])
+
+
 def backfill_duplicate_started_at(
     conn: sqlite3.Connection,
     duplicate: dict[str, object],
@@ -1167,11 +1240,25 @@ def backfill_duplicate_started_at(
     return True
 
 
+def import_activity_file_to_review(conn: sqlite3.Connection, params: dict[str, str]) -> int:
+    rows = load_activity_file(required(params, "activity_file"), required(params, "source"))
+    imported = 0
+    for row in rows:
+        add_raw_activity(conn, row)
+        imported += 1
+    return imported
+
+
 def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    editable_calibration_profile(conn)
+    source = params["source"].strip()
+    source_activity_id = empty_to_none(params.get("source_activity_id"))
+    title = empty_to_none(params.get("title"))
     raw_distance = maybe_float(params.get("raw_distance"))
     started_on = normalize_datetime(empty_to_none(params.get("started_on")))
     duration_seconds = maybe_int(params.get("duration_seconds"))
     hr = maybe_int(params.get("hr"))
+    raw_payload = empty_to_none(params.get("raw_payload"))
     suggestion = suggest_activity_classification(conn, raw_distance)
     duplicate = find_activity_duplicate(
         conn,
@@ -1183,26 +1270,29 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     )
     if duplicate:
         suggestion = suggestion_for_duplicate(suggestion, duplicate)
+    if duplicate and hr is None and float(duplicate["confidence"]) >= STRONG_DUPLICATE_THRESHOLD:
+        hr = hr_for_duplicate(conn, duplicate)
     review_status = review_status_for_activity(duplicate, hr)
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT OR IGNORE INTO raw_activities (
             source, source_activity_id, title, started_on, duration_seconds,
-            raw_distance, hr, review_status, session_type, circuit_id,
+            raw_distance, hr, raw_payload, review_status, session_type, circuit_id,
             classification_confidence, classification_reason,
             duplicate_entry_type, duplicate_entry_id, duplicate_confidence,
             duplicate_reason
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            params["source"].strip(),
-            empty_to_none(params.get("source_activity_id")),
-            empty_to_none(params.get("title")),
+            source,
+            source_activity_id,
+            title,
             started_on,
             duration_seconds,
             raw_distance,
             hr,
+            raw_payload,
             review_status,
             suggestion["session_type"],
             suggestion.get("circuit_id"),
@@ -1214,9 +1304,80 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             duplicate["reason"] if duplicate else None,
         ),
     )
-    if duplicate and duplicate["confidence"] >= STRONG_DUPLICATE_THRESHOLD:
+    if cursor.rowcount == 0:
+        enrich_existing_raw_activity(
+            conn,
+            source=source,
+            source_activity_id=source_activity_id,
+            title=title,
+            started_on=started_on,
+            duration_seconds=duration_seconds,
+            raw_distance=raw_distance,
+            hr=hr,
+            raw_payload=raw_payload,
+        )
+    elif duplicate and duplicate["confidence"] >= STRONG_DUPLICATE_THRESHOLD:
         backfill_duplicate_started_at(conn, duplicate, started_on)
     conn.commit()
+
+
+def enrich_existing_raw_activity(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    source_activity_id: str | None,
+    title: str | None,
+    started_on: str | None,
+    duration_seconds: int | None,
+    raw_distance: float | None,
+    hr: int | None,
+    raw_payload: str | None,
+) -> None:
+    if source_activity_id is None:
+        return
+    row = conn.execute(
+        "SELECT * FROM raw_activities WHERE source = ? AND source_activity_id = ?",
+        (source, source_activity_id),
+    ).fetchone()
+    if row is None:
+        return
+    existing_duplicate = None
+    if row["duplicate_entry_type"] and row["duplicate_entry_id"]:
+        existing_duplicate = {
+            "entry_type": row["duplicate_entry_type"],
+            "entry_id": row["duplicate_entry_id"],
+            "confidence": row["duplicate_confidence"],
+            "reason": row["duplicate_reason"],
+        }
+    if hr is None and existing_duplicate and (row["duplicate_confidence"] or 0) >= STRONG_DUPLICATE_THRESHOLD:
+        hr = hr_for_duplicate(conn, existing_duplicate)
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET title = ?,
+            started_on = ?,
+            duration_seconds = ?,
+            raw_distance = ?,
+            hr = ?,
+            raw_payload = ?
+        WHERE id = ?
+        """,
+        (
+            prefer_existing(row["title"], title),
+            prefer_existing(row["started_on"], started_on),
+            prefer_existing(row["duration_seconds"], duration_seconds),
+            prefer_existing(row["raw_distance"], raw_distance),
+            prefer_existing(row["hr"], hr),
+            merge_raw_payload(row["raw_payload"], raw_payload),
+            row["id"],
+        ),
+    )
+    if existing_duplicate and (row["duplicate_confidence"] or 0) >= STRONG_DUPLICATE_THRESHOLD:
+        backfill_duplicate_started_at(conn, existing_duplicate, started_on or row["started_on"])
+
+
+def prefer_existing(existing: object, incoming: object) -> object:
+    return existing if existing not in (None, "") else incoming
 
 
 def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -1259,15 +1420,17 @@ def confirm_duplicate_activity(conn: sqlite3.Connection, params: dict[str, str])
     reason = "Manual duplicate confirmation"
     if backfilled:
         reason += "; start time backfilled"
+    duplicate_hr = hr_for_duplicate(conn, duplicate)
     conn.execute(
         """
         UPDATE raw_activities
         SET review_status = 'already_logged',
+            hr = COALESCE(hr, ?),
             classification_confidence = 1,
             classification_reason = ?
         WHERE id = ?
         """,
-        (reason, row["id"]),
+        (duplicate_hr, reason, row["id"]),
     )
     conn.commit()
 
@@ -1281,6 +1444,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
         raise ValueError("Raw activity has already been handled.")
     if raw_activity_has_entry(conn, raw_id):
         raise ValueError("Raw activity is already linked to an entry.")
+    payload = raw_payload_dict(row)
 
     session_type = required(params, "session_type")
     if session_type not in ("sprint", "lap"):
@@ -1299,6 +1463,8 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
         raise ValueError("HR is required to import an activity.")
     resistance = maybe_int(params.get("resistance"))
     rpm = maybe_float(params.get("rpm"))
+    if rpm is None:
+        rpm = maybe_float(str(payload.get("average_cadence"))) if payload.get("average_cadence") is not None else None
     entry_index = maybe_int(params.get("entry_index"))
     notes = empty_to_none(params.get("notes"))
 
@@ -1344,7 +1510,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
                 entry_index,
                 duration_minutes,
                 rpm,
-                maybe_float(params.get("device_watts")),
+                promotion_device_watts(params, payload),
                 hr,
                 resistance,
                 row["raw_distance"],
@@ -1383,6 +1549,14 @@ def raw_activity_has_entry(conn: sqlite3.Connection, raw_id: int) -> bool:
         return True
     lap = conn.execute("SELECT id FROM lap_entries WHERE raw_activity_id = ? LIMIT 1", (raw_id,)).fetchone()
     return lap is not None
+
+
+def promotion_device_watts(params: dict[str, str], payload: dict[str, object]) -> float | None:
+    value = maybe_float(params.get("device_watts"))
+    if value is not None:
+        return value
+    average_watts = payload.get("average_watts")
+    return maybe_float(str(average_watts)) if average_watts is not None else None
 
 
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
