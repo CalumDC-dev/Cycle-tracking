@@ -17,6 +17,7 @@ from workout_tracker.web import (
     editable_calibration_profile,
     add_circuit,
     confirm_duplicate_activity,
+    delete_entry,
     find_activity_duplicate,
     grouped_table,
     import_activity_file_to_review,
@@ -273,6 +274,42 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(len(duplicate_items), 1)
         self.assertEqual(duplicate_items[0]["category"], "Analysis blocker")
         self.assertIn("start time within 2 minutes", duplicate_items[0]["detail"])
+        html = render_maintenance(self.conn)
+        self.assertIn('/entries/delete', html)
+        self.assertIn('name="entry_type" value="sprint"', html)
+        self.assertIn("Delete sprint 1", html)
+
+    def test_delete_entry_removes_manual_duplicate(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:30",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:31",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+        duplicate_id = self.conn.execute(
+            "SELECT id FROM sprint_entries ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+
+        delete_entry(self.conn, {"entry_type": "sprint", "id": str(duplicate_id)})
+
+        remaining = self.conn.execute("SELECT COUNT(*) AS total FROM sprint_entries").fetchone()["total"]
+        issues = [item["issue"] for item in maintenance_items(self.conn)]
+        self.assertEqual(remaining, 1)
+        self.assertNotIn("Possible duplicate entry", issues)
 
     def test_maintenance_flags_missing_entry_fields_and_review_items(self):
         add_sprint_entry(

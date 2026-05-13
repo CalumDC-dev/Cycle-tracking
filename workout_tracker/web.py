@@ -379,6 +379,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/entries/lap/update":
                 update_lap_entry(conn, params)
                 self._redirect("/entries")
+            elif parsed.path == "/entries/delete":
+                delete_entry(conn, params)
+                self._redirect("/maintenance")
             elif parsed.path == "/calibration/profile/update":
                 update_calibration_profile(conn, params)
                 self._redirect("/calibration")
@@ -1173,6 +1176,7 @@ def add_manual_duplicate_issues(items: list[dict[str, object]], sprints: list[ob
                     "Possible duplicate entry",
                     reason or "Similar sprint entries were found.",
                     f"/entries#sprint-{sprint.id}",
+                    duplicate_actions("sprint", sprint, candidate),
                 )
 
     for index, lap in enumerate(laps):
@@ -1208,6 +1212,7 @@ def add_manual_duplicate_issues(items: list[dict[str, object]], sprints: list[ob
                     "Possible duplicate entry",
                     reason or "Similar lap entries were found.",
                     f"/entries#lap-{lap.id}",
+                    duplicate_actions("lap", lap, candidate),
                 )
 
 
@@ -1264,6 +1269,7 @@ def add_entry_issue(
     issue: str,
     detail: str,
     action: str,
+    extra_actions: list[dict[str, object]] | None = None,
 ) -> None:
     items.append({
         "area": area,
@@ -1274,6 +1280,7 @@ def add_entry_issue(
         "issue": issue,
         "detail": detail,
         "action": action,
+        "extra_actions": extra_actions or [],
     })
 
 
@@ -1282,7 +1289,6 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
         return '<div class="empty">No maintenance issues found.</div>'
     rows = []
     for item in items:
-        action = escape(str(item["action"]))
         rows.append([
             escape(str(item["category"])),
             escape(str(item["date"])),
@@ -1291,9 +1297,56 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
             escape(str(item["record"])),
             escape(str(item["issue"])),
             escape(str(item["detail"])),
-            f'<a href="{action}">Open</a>',
+            maintenance_actions(item),
         ])
     return html_table(["Category", "Date", "Start", "Area", "Record", "Issue", "Detail", ""], rows)
+
+
+def duplicate_actions(entry_type: str, first: object, second: object) -> list[dict[str, object]]:
+    return [
+        {"kind": "link", "href": f"/entries#{entry_type}-{second.id}", "label": "Open match"},
+        {
+            "kind": "delete",
+            "entry_type": entry_type,
+            "entry_id": first.id,
+            "label": f"Delete {duplicate_entry_label(entry_type, first)}",
+        },
+        {
+            "kind": "delete",
+            "entry_type": entry_type,
+            "entry_id": second.id,
+            "label": f"Delete {duplicate_entry_label(entry_type, second)}",
+        },
+    ]
+
+
+def duplicate_entry_label(entry_type: str, entry: object) -> str:
+    if entry_type == "sprint":
+        index = getattr(entry, "sprint_index", None)
+    else:
+        index = getattr(entry, "lap_index", None)
+    number = index or getattr(entry, "id")
+    return f"{entry_type} {number} (id {getattr(entry, 'id')})"
+
+
+def maintenance_actions(item: dict[str, object]) -> str:
+    parts = [f'<a href="{escape(str(item["action"]))}">Open</a>']
+    for action in item.get("extra_actions", []):
+        if not isinstance(action, dict):
+            continue
+        if action.get("kind") == "link":
+            parts.append(f'<a href="{escape(str(action["href"]))}">{escape(str(action["label"]))}</a>')
+        elif action.get("kind") == "delete":
+            label = str(action["label"])
+            parts.append(
+                f'<form method="post" action="/entries/delete" '
+                f'onsubmit="return confirm(\'Delete this entry? This cannot be undone.\')">'
+                f'<input type="hidden" name="entry_type" value="{escape(str(action["entry_type"]))}">'
+                f'<input type="hidden" name="id" value="{escape(str(action["entry_id"]))}">'
+                f'<button class="secondary" type="submit">{escape(label)}</button>'
+                f"</form>"
+            )
+    return f'<div class="actions">{"".join(parts)}</div>'
 
 
 def maintenance_category_rank(category: str) -> int:
@@ -2752,6 +2805,47 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             entry_id,
         ),
     )
+    conn.commit()
+
+
+def delete_entry(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    entry_type = required(params, "entry_type")
+    entry_id = maybe_int(required(params, "id"))
+    if entry_id is None:
+        raise ValueError("Entry id is required.")
+    table = {"sprint": "sprint_entries", "lap": "lap_entries"}.get(entry_type)
+    if table is None:
+        raise ValueError("Entry type must be sprint or lap.")
+    row = conn.execute(f"SELECT raw_activity_id FROM {table} WHERE id = ?", (entry_id,)).fetchone()
+    if row is None:
+        raise ValueError("Entry was not found.")
+    raw_activity_id = row["raw_activity_id"]
+    conn.execute(f"DELETE FROM {table} WHERE id = ?", (entry_id,))
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET duplicate_entry_type = NULL,
+            duplicate_entry_id = NULL,
+            duplicate_confidence = NULL,
+            duplicate_reason = NULL,
+            review_status = CASE
+                WHEN review_status = 'already_logged' AND hr IS NULL THEN 'needs_hr'
+                WHEN review_status = 'already_logged' THEN 'needs_review'
+                ELSE review_status
+            END
+        WHERE duplicate_entry_type = ? AND duplicate_entry_id = ?
+        """,
+        (entry_type, entry_id),
+    )
+    if raw_activity_id is not None:
+        conn.execute(
+            """
+            UPDATE raw_activities
+            SET review_status = CASE WHEN hr IS NULL THEN 'needs_hr' ELSE 'needs_review' END
+            WHERE id = ? AND review_status = 'imported'
+            """,
+            (raw_activity_id,),
+        )
     conn.commit()
 
 
