@@ -22,14 +22,18 @@ from workout_tracker.web import (
     import_activity_file_to_review,
     parse_post_params,
     populate_missing_duplicate_hr,
+    render_insights,
     render_entries,
     render_maintenance,
     review_actions,
+    calibration_coverage_rows,
+    circuit_progress_rows,
     maintenance_items,
     promote_activity_form,
     promote_raw_activity,
     raw_activity_has_entry,
     classify_activity,
+    strength_signal_rows,
     update_circuit,
     update_calibration_profile,
     update_lap_entry,
@@ -257,6 +261,86 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("/entries#sprint-", html)
         self.assertIn("/review", html)
         self.assertIn("/export/backup.zip", html)
+
+    def test_render_insights_summarises_progress_strength_and_calibration(self):
+        add_resistance_calibration_test(
+            self.conn,
+            {
+                "tested_on": "2026-05-03",
+                "resistance": "8",
+                "duration_minutes": "5",
+                "device_watts": "500",
+                "expected_watts": "60",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-04",
+                "started_at": "2026-05-04T07:30",
+                "sprint_index": "1",
+                "duration_minutes": "10",
+                "rpm": "80",
+                "device_watts": "500",
+                "hr": "120",
+                "resistance": "8",
+                "device_distance": "3",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-04",
+                "started_at": "2026-05-04T07:45",
+                "lap_index": "1",
+                "circuit_id": "1",
+                "lap_time_minutes": "5",
+                "hr": "120",
+                "resistance": "4",
+                "rpm": "100",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-05",
+                "started_at": "2026-05-05T07:45",
+                "lap_index": "1",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+                "hr": "120",
+                "resistance": "4",
+                "rpm": "100",
+            },
+        )
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "metric-source",
+                "started_on": "2026-05-04T07:30",
+                "review_status": "already_logged",
+                "session_type": "sprint",
+                "raw_payload": json.dumps({"average_watts": 500, "best_300s_watts": 480, "average_cadence": 80}),
+            },
+        )
+
+        sprints = calculated_sprints(self.conn)
+        laps = calculated_laps(self.conn)
+        circuit_rows = circuit_progress_rows(laps)
+        strength_rows = strength_signal_rows(sprints, laps)
+        coverage_rows = calibration_coverage_rows(self.conn)
+        html = render_insights(self.conn)
+
+        self.assertEqual(circuit_rows[0]["circuit"], "Manual Circuit")
+        self.assertAlmostEqual(circuit_rows[0]["change_minutes"], 1.0)
+        self.assertEqual(strength_rows[0]["resistance"], 8)
+        self.assertEqual(coverage_rows[7]["resistance"], 8)
+        self.assertAlmostEqual(coverage_rows[7]["scaling"], 0.12)
+        self.assertIn("Circuit Progress", html)
+        self.assertIn("Strength Signals", html)
+        self.assertIn("Resistance Calibration Coverage", html)
+        self.assertIn("Best 5 minute estimated watts", html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)

@@ -297,6 +297,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/maintenance":
                 conn = self._conn()
                 self._html("Maintenance", render_maintenance(conn), "maintenance")
+            elif parsed.path == "/insights":
+                conn = self._conn()
+                self._html("Insights", render_insights(conn), "insights")
             elif parsed.path == "/review":
                 conn = self._conn()
                 self._html("Review", render_review(conn), "review")
@@ -457,6 +460,7 @@ def page(title: str, body: str, active: str) -> str:
         ("circuits", "/circuits", "Circuits"),
         ("calibration", "/calibration", "Calibration"),
         ("maintenance", "/maintenance", "Maintenance"),
+        ("insights", "/insights", "Insights"),
         ("review", "/review", "Review"),
     ]
     links = "".join(
@@ -810,6 +814,177 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
   {calibration_tests_table(tests)}
 </section>
 """
+
+
+def render_insights(conn: sqlite3.Connection) -> str:
+    sprints = calculated_sprints(conn)
+    laps = calculated_laps(conn)
+    source_rows = source_metric_rows(conn)
+    circuit_rows = circuit_progress_rows(laps)
+    strength_rows = strength_signal_rows(sprints, laps)
+    calibration_rows = calibration_coverage_rows(conn)
+    sprint_watts = [
+        (sprint.started_at or sprint.performed_on, sprint.estimated_watts)
+        for sprint in sprints
+        if sprint.estimated_watts is not None
+    ]
+    sprint_rpm = [(sprint.started_at or sprint.performed_on, sprint.rpm) for sprint in sprints if sprint.rpm is not None]
+    sprint_hr = [(sprint.started_at or sprint.performed_on, sprint.hr) for sprint in sprints if sprint.hr is not None]
+    return f"""
+<section class="band">
+  <h2>Insight Summary</h2>
+  <div class="metrics">
+    {metric("Circuits tracked", len(circuit_rows), "green")}
+    {metric("Best circuit gain", best_circuit_gain(circuit_rows), "green")}
+    {metric("Best sprint watts", fmt_num(max_sprint_watts(sprints), 1), "amber")}
+    {metric("Strength signals", len(strength_rows), "blue")}
+    {metric("Calibrated levels", calibrated_resistance_count(calibration_rows), "blue")}
+  </div>
+</section>
+<section class="band">
+  <h2>Sprint Trends</h2>
+  <div class="grid-two">
+    {line_chart("Estimated Watts", sprint_watts, "#1f5a85")}
+    {line_chart("RPM", sprint_rpm, "#2f7d59")}
+    {line_chart("HR", sprint_hr, "#a33b3b")}
+    {line_chart("Best 5 Minute Estimated Watts", source_metric_points(source_rows, "best_300s_watts"), "#a66200")}
+  </div>
+</section>
+<section class="band">
+  <h2>Circuit Progress</h2>
+  {circuit_progress_table(circuit_rows)}
+</section>
+<section class="band">
+  <h2>Source Highlights</h2>
+  {source_highlights_table(source_rows)}
+</section>
+<section class="band">
+  <h2>Strength Signals</h2>
+  {strength_signals_table(strength_rows)}
+</section>
+<section class="band">
+  <h2>Resistance Calibration Coverage</h2>
+  {calibration_coverage_table(calibration_rows)}
+</section>
+"""
+
+
+def circuit_progress_rows(laps: list[object]) -> list[dict[str, object]]:
+    grouped: dict[str, list[object]] = {}
+    for lap in laps:
+        if not lap.circuit_name or lap.lap_time_minutes is None:
+            continue
+        grouped.setdefault(str(lap.circuit_name), []).append(lap)
+
+    rows = []
+    for circuit_name, circuit_laps in grouped.items():
+        ordered = sorted(circuit_laps, key=lambda lap: (lap.performed_on, lap.started_at or "", lap.id))
+        times = [float(lap.lap_time_minutes) for lap in ordered if lap.lap_time_minutes is not None]
+        if not times:
+            continue
+        first = ordered[0]
+        latest = ordered[-1]
+        best = min(ordered, key=lambda lap: lap.lap_time_minutes or 999999)
+        rows.append({
+            "circuit": circuit_name,
+            "laps": len(ordered),
+            "first_time": first.lap_time_minutes,
+            "latest_time": latest.lap_time_minutes,
+            "best_time": best.lap_time_minutes,
+            "average_time": average_value(times),
+            "change_minutes": (
+                float(first.lap_time_minutes) - float(latest.lap_time_minutes)
+                if first.lap_time_minutes is not None and latest.lap_time_minutes is not None
+                else None
+            ),
+            "best_date": best.performed_on,
+            "latest_date": latest.performed_on,
+        })
+    return sorted(rows, key=lambda row: str(row["circuit"]))
+
+
+def strength_signal_rows(sprints: list[object], laps: list[object]) -> list[dict[str, object]]:
+    rows = []
+    for sprint in sprints:
+        if is_strength_signal(sprint.resistance, sprint.rpm):
+            rows.append({
+                "date": sprint.performed_on,
+                "start": fmt_start_time(sprint.started_at),
+                "type": "Sprint",
+                "label": f"Sprint {sprint.sprint_index or sprint.id}",
+                "resistance": sprint.resistance,
+                "rpm": sprint.rpm,
+                "estimated_watts": sprint.estimated_watts,
+                "hr": sprint.hr,
+                "minutes": sprint.duration_minutes,
+                "calories": sprint.calories_mets,
+            })
+    for lap in laps:
+        if is_strength_signal(lap.resistance, lap.rpm):
+            rows.append({
+                "date": lap.performed_on,
+                "start": fmt_start_time(lap.started_at),
+                "type": "Lap",
+                "label": lap.circuit_name or f"Lap {lap.lap_index or lap.id}",
+                "resistance": lap.resistance,
+                "rpm": lap.rpm,
+                "estimated_watts": None,
+                "hr": lap.hr,
+                "minutes": lap.lap_time_minutes,
+                "calories": lap.calories_mets,
+            })
+    return sorted(rows, key=lambda row: (str(row["date"]), str(row["start"]), str(row["type"])))
+
+
+def is_strength_signal(resistance: object, rpm: object, min_resistance: int = 7, max_rpm: int = 95) -> bool:
+    if resistance is None or rpm is None:
+        return False
+    return int(resistance) >= min_resistance and float(rpm) <= max_rpm
+
+
+def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    scaling = {
+        int(row["resistance"]): row["scaling"]
+        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+    }
+    tests = {
+        int(row["resistance"]): row
+        for row in conn.execute(
+            """
+            SELECT resistance, COUNT(*) AS tests, MAX(tested_on) AS last_tested
+            FROM resistance_calibration_tests
+            GROUP BY resistance
+            """
+        ).fetchall()
+    }
+    sprint_counts = resistance_counts(conn, "sprint_entries")
+    lap_counts = resistance_counts(conn, "lap_entries")
+    rows = []
+    for resistance in range(1, 13):
+        test_row = tests.get(resistance)
+        rows.append({
+            "resistance": resistance,
+            "scaling": scaling.get(resistance),
+            "sprint_sessions": sprint_counts.get(resistance, 0),
+            "lap_sessions": lap_counts.get(resistance, 0),
+            "calibration_tests": int(test_row["tests"]) if test_row else 0,
+            "last_tested": test_row["last_tested"] if test_row else "",
+        })
+    return rows
+
+
+def resistance_counts(conn: sqlite3.Connection, table_name: str) -> dict[int, int]:
+    if table_name not in {"sprint_entries", "lap_entries"}:
+        raise ValueError("Unsupported table for resistance counts.")
+    rows = conn.execute(
+        f"""
+        SELECT resistance, COUNT(*) AS sessions
+        FROM {table_name}
+        WHERE resistance IS NOT NULL
+        GROUP BY resistance
+        """
+    ).fetchall()
+    return {int(row["resistance"]): int(row["sessions"]) for row in rows}
 
 
 def render_maintenance(conn: sqlite3.Connection) -> str:
@@ -1334,6 +1509,88 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
 </div>"""
 
 
+def circuit_progress_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Circuit", "Laps", "First", "Latest", "Best", "Average", "Latest gain", "Best date", "Latest date"],
+        [
+            [
+                row["circuit"],
+                row["laps"],
+                fmt_minutes(row["first_time"]),
+                fmt_minutes(row["latest_time"]),
+                fmt_minutes(row["best_time"]),
+                fmt_minutes(row["average_time"]),
+                signed_minutes(row["change_minutes"]),
+                row["best_date"],
+                row["latest_date"],
+            ]
+            for row in rows
+        ],
+    )
+
+
+def source_highlights_table(rows: list[dict[str, object]]) -> str:
+    highlights = []
+    for label, key, digits in [
+        ("Average estimated watts", "average_watts", 0),
+        ("Best 5 minute estimated watts", "best_300s_watts", 0),
+        ("Best 60 second estimated watts", "best_60s_watts", 0),
+        ("Average cadence", "average_cadence", 0),
+        ("Watts variability", "watts_variability_pct", 1),
+    ]:
+        row = best_source_row(rows, key)
+        if row is None:
+            continue
+        highlights.append([
+            label,
+            fmt_num(row.get(key), digits),
+            row.get("started_on", ""),
+            row.get("session_type", ""),
+            row.get("circuit", ""),
+            row.get("resistance", ""),
+        ])
+    return table(["Metric", "Value", "Start", "Type", "Circuit", "Resistance"], highlights)
+
+
+def strength_signals_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Date", "Start", "Type", "Session", "Resistance", "RPM", "Est watts", "HR", "Time", "Calories"],
+        [
+            [
+                row["date"],
+                row["start"],
+                row["type"],
+                row["label"],
+                row["resistance"],
+                fmt_num(row["rpm"], 0),
+                fmt_num(row["estimated_watts"], 1),
+                row["hr"],
+                fmt_minutes(row["minutes"]),
+                fmt_num(row["calories"], 1),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def calibration_coverage_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Resistance", "Status", "Scaling", "Sprint sessions", "Lap sessions", "Tests", "Last tested"],
+        [
+            [
+                row["resistance"],
+                "Calibrated" if row["scaling"] is not None else "Needs factor",
+                fmt_num(row["scaling"], 4),
+                row["sprint_sessions"],
+                row["lap_sessions"],
+                row["calibration_tests"],
+                row["last_tested"],
+            ]
+            for row in rows
+        ],
+    )
+
+
 def daily_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Date", "Sprints", "Laps", "Calories (HR/MET)", "Time", "Avg watts", "Avg RPM", "Lap distance", "Total distance"],
@@ -1543,6 +1800,34 @@ def max_metric(rows: list[dict[str, object]], key: str) -> float | None:
         if value not in (None, ""):
             values.append(float(value))
     return max(values) if values else None
+
+
+def best_source_row(rows: list[dict[str, object]], key: str) -> dict[str, object] | None:
+    candidates = [row for row in rows if row.get(key) not in (None, "")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: float(row[key]))
+
+
+def max_sprint_watts(sprints: list[object]) -> float | None:
+    values = [float(sprint.estimated_watts) for sprint in sprints if sprint.estimated_watts is not None]
+    return max(values) if values else None
+
+
+def calibrated_resistance_count(rows: list[dict[str, object]]) -> int:
+    return sum(1 for row in rows if row.get("scaling") is not None)
+
+
+def best_circuit_gain(rows: list[dict[str, object]]) -> str:
+    gains = [float(row["change_minutes"]) for row in rows if row.get("change_minutes") is not None]
+    if not gains:
+        return ""
+    best = max(gains)
+    return signed_minutes(best)
+
+
+def average_value(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
 
 
 def row_value(row: sqlite3.Row, key: str, default: object = None) -> object:
@@ -2559,6 +2844,13 @@ def signed_num(value: object, digits: int = 1) -> str:
         return ""
     num = float(value)
     return f"{num:+,.{digits}f}"
+
+
+def signed_minutes(value: object) -> str:
+    if value is None:
+        return ""
+    prefix = "+" if float(value) >= 0 else "-"
+    return f"{prefix}{fmt_minutes(abs(float(value)))}"
 
 
 def signed_percent(value: object) -> str:
