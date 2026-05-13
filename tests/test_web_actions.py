@@ -108,8 +108,7 @@ class WebActionTests(unittest.TestCase):
                 "started_at": "07:45",
                 "lap_index": "1",
                 "circuit_id": "1",
-                "lap_time_min": "4",
-                "lap_time_sec": "12",
+                "lap_time_minutes": "4:12",
                 "hr": "115",
                 "resistance": "4",
                 "rpm": "100",
@@ -122,6 +121,19 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(lap.started_at, "2026-05-02T07:45")
         self.assertAlmostEqual(lap.lap_time_minutes, 4.2)
         self.assertAlmostEqual(lap.average_speed, 28.5714285714)
+
+    def test_add_lap_entry_accepts_hour_duration_format(self):
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "circuit_id": "1",
+                "lap_time_minutes": "1:02:30",
+            },
+        )
+
+        lap = calculated_laps(self.conn)[0]
+        self.assertAlmostEqual(lap.lap_time_minutes, 62.5)
 
     def test_add_lap_entry_rejects_missing_circuit(self):
         with self.assertRaises(ValueError):
@@ -189,7 +201,7 @@ class WebActionTests(unittest.TestCase):
                 "started_at": "2026-05-02T07:45",
                 "lap_index": "2",
                 "circuit_id": "1",
-                "lap_time_minutes": "4",
+                "lap_time_minutes": "4:30",
                 "hr": "115",
                 "resistance": "4",
                 "rpm": "100",
@@ -200,6 +212,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(lap.started_at, "2026-05-02T07:45")
         self.assertEqual(lap.lap_index, 2)
         self.assertEqual(lap.resistance, 4)
+        self.assertAlmostEqual(lap.lap_time_minutes, 4.5)
 
     def test_render_entries_has_inline_edit_forms_with_resistance_defaults(self):
         add_sprint_entry(
@@ -226,8 +239,9 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="sprint_index"', html)
         self.assertIn('name="lap_index"', html)
         self.assertIn('type="time"', html)
-        self.assertIn('name="lap_time_min"', html)
-        self.assertIn('name="lap_time_sec"', html)
+        self.assertIn('name="lap_time_minutes"', html)
+        self.assertIn('value="4:00"', html)
+        self.assertNotIn('name="lap_time_sec"', html)
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
 

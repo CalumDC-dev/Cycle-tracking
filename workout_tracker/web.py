@@ -619,8 +619,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
     <label>Lap number<input name="lap_index" type="number" min="1"></label>
     <label>Circuit<select name="circuit_id" required id="lap-circuit">{circuit_select_options(circuits)}</select></label>
     <label>Kinomap goal<input id="lap-goal" readonly></label>
-    <label>Lap minutes<input name="lap_time_min" type="number" min="0"></label>
-    <label>Lap seconds<input name="lap_time_sec" type="number" min="0" max="59" step="1"></label>
+    <label>Lap time<input name="lap_time_minutes" placeholder="1:30"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
@@ -722,7 +721,7 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
                     entry_input(form_id, "started_at", time_input_value(lap.started_at), input_type="time"),
                     entry_input(form_id, "lap_index", fmt_raw(lap.lap_index), input_type="number", min_value="1", css_class="narrow"),
                     entry_select(form_id, "circuit_id", circuit_select_options(circuits, lap.circuit_id), required=True),
-                    lap_time_inputs(form_id, lap.lap_time_minutes),
+                    entry_input(form_id, "lap_time_minutes", duration_entry_value(lap.lap_time_minutes)),
                     readonly_cell(fmt_num(lap.length, 3)),
                     readonly_cell(fmt_num(lap.average_speed, 2)),
                     entry_input(form_id, "hr", fmt_raw(lap.hr), input_type="number", min_value="0", css_class="narrow"),
@@ -1866,24 +1865,6 @@ def entry_input(
 def entry_select(form_id: str, name: str, options: str, required: bool = True) -> str:
     required_attr = " required" if required else ""
     return f'<select form="{escape(form_id)}" name="{escape(name)}"{required_attr}>{options}</select>'
-
-
-def lap_time_inputs(form_id: str, value: object) -> str:
-    minutes, seconds = lap_time_parts(value)
-    return (
-        entry_input(form_id, "lap_time_min", minutes, input_type="number", min_value="0", css_class="narrow")
-        + " "
-        + entry_input(
-            form_id,
-            "lap_time_sec",
-            seconds,
-            input_type="number",
-            step="1",
-            min_value="0",
-            max_value="59",
-            css_class="narrow",
-        )
-    )
 
 
 def readonly_cell(value: object) -> str:
@@ -3181,10 +3162,10 @@ def date_part(value: str | None) -> str | None:
     return cleaned[:10]
 
 
-def lap_time_minutes_from_params(params: dict[str, str]) -> float | None:
-    existing = maybe_float(params.get("lap_time_minutes"))
+def lap_time_minutes_from_params(params: dict[str, FormValue]) -> float | None:
+    existing = empty_to_none(params.get("lap_time_minutes"))
     if existing is not None:
-        return existing
+        return duration_text_to_minutes(existing)
     minutes = maybe_int(params.get("lap_time_min"))
     seconds = maybe_int(params.get("lap_time_sec"))
     if minutes is None and seconds is None:
@@ -3196,12 +3177,43 @@ def lap_time_minutes_from_params(params: dict[str, str]) -> float | None:
     return minutes + (seconds / 60)
 
 
-def lap_time_parts(value: object) -> tuple[str, str]:
+def duration_text_to_minutes(value: str) -> float:
+    cleaned = value.strip()
+    if ":" not in cleaned:
+        minutes = float(cleaned)
+        if minutes < 0:
+            raise ValueError("Lap time cannot be negative.")
+        return minutes
+    parts = cleaned.split(":")
+    if len(parts) not in (2, 3) or any(part.strip() == "" for part in parts):
+        raise ValueError("Lap time must use minutes:seconds or hours:minutes:seconds.")
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("Lap time must use whole minutes and seconds.") from exc
+    if any(number < 0 for number in numbers):
+        raise ValueError("Lap time cannot be negative.")
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        hours = 0
+    else:
+        hours, minutes, seconds = numbers
+        if minutes > 59:
+            raise ValueError("Lap minutes must be between 0 and 59 when hours are supplied.")
+    if seconds > 59:
+        raise ValueError("Lap seconds must be between 0 and 59.")
+    return (hours * 60) + minutes + (seconds / 60)
+
+
+def duration_entry_value(value: object) -> str:
     if value in (None, ""):
-        return "", ""
+        return ""
     total_seconds = int(round(float(value) * 60))
     minutes, seconds = divmod(total_seconds, 60)
-    return str(minutes), str(seconds)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def maybe_float(value: str | None) -> float | None:
