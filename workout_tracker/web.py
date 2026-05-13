@@ -598,7 +598,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <h2>Add Sprint Entry</h2>
   <form class="stack" method="post" action="/entries/sprint/add">
     <label>Date<input name="performed_on" type="date" required></label>
-    <label>Start time<input name="started_at" type="datetime-local"></label>
+    <label>Start time<input name="started_at" type="time"></label>
     <label>Day number<input name="day_number" type="number" min="1"></label>
     <label>Sprint number<input name="sprint_index" type="number" min="1"></label>
     <label>Duration minutes<input name="duration_minutes" type="number" step="0.001" min="0"></label>
@@ -615,11 +615,12 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <h2>Add Lap Entry</h2>
   <form class="stack" method="post" action="/entries/lap/add">
     <label>Date<input name="performed_on" type="date" required></label>
-    <label>Start time<input name="started_at" type="datetime-local"></label>
+    <label>Start time<input name="started_at" type="time"></label>
     <label>Lap number<input name="lap_index" type="number" min="1"></label>
     <label>Circuit<select name="circuit_id" required id="lap-circuit">{circuit_select_options(circuits)}</select></label>
     <label>Kinomap goal<input id="lap-goal" readonly></label>
-    <label>Lap time minutes<input name="lap_time_minutes" type="number" step="0.001" min="0"></label>
+    <label>Lap minutes<input name="lap_time_min" type="number" min="0"></label>
+    <label>Lap seconds<input name="lap_time_sec" type="number" min="0" max="59" step="1"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
@@ -650,7 +651,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
                 sprint.performed_on,
                 [
                     entry_input(form_id, "performed_on", sprint.performed_on, input_type="date", required=True),
-                    entry_input(form_id, "started_at", datetime_local_value(sprint.started_at), input_type="datetime-local"),
+                    entry_input(form_id, "started_at", time_input_value(sprint.started_at), input_type="time"),
                     entry_input(form_id, "sprint_index", fmt_raw(sprint.sprint_index), input_type="number", min_value="1", css_class="narrow"),
                     entry_input(
                         form_id,
@@ -718,17 +719,10 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
                 lap.performed_on,
                 [
                     entry_input(form_id, "performed_on", lap.performed_on, input_type="date", required=True),
-                    entry_input(form_id, "started_at", datetime_local_value(lap.started_at), input_type="datetime-local"),
+                    entry_input(form_id, "started_at", time_input_value(lap.started_at), input_type="time"),
                     entry_input(form_id, "lap_index", fmt_raw(lap.lap_index), input_type="number", min_value="1", css_class="narrow"),
                     entry_select(form_id, "circuit_id", circuit_select_options(circuits, lap.circuit_id), required=True),
-                    entry_input(
-                        form_id,
-                        "lap_time_minutes",
-                        step_value(lap.lap_time_minutes, 3),
-                        input_type="number",
-                        step="0.001",
-                        min_value="0",
-                    ),
+                    lap_time_inputs(form_id, lap.lap_time_minutes),
                     readonly_cell(fmt_num(lap.length, 3)),
                     readonly_cell(fmt_num(lap.average_speed, 2)),
                     entry_input(form_id, "hr", fmt_raw(lap.hr), input_type="number", min_value="0", css_class="narrow"),
@@ -1048,7 +1042,9 @@ def render_maintenance(conn: sqlite3.Connection) -> str:
 
 def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
-    for sprint in calculated_sprints(conn):
+    sprints = calculated_sprints(conn)
+    laps = calculated_laps(conn)
+    for sprint in sprints:
         context = f"Sprint {sprint.sprint_index or sprint.id}"
         action = f"/entries#sprint-{sprint.id}"
         maybe_add_issue(
@@ -1080,7 +1076,7 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
         if sprint.resistance is not None and sprint.device_watts is not None and sprint.estimated_watts is None:
             add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Analysis blocker", "Missing resistance factor", "Add a scaling factor for this resistance level.", f"/calibration")
 
-    for lap in calculated_laps(conn):
+    for lap in laps:
         context = f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id}"
         action = f"/entries#lap-{lap.id}"
         maybe_add_issue(
@@ -1109,6 +1105,8 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
         )
         if lap.hr is not None and lap.lap_time_minutes is not None and lap.calories_mets is None:
             add_entry_issue(items, "Lap", lap.performed_on, lap.started_at, context, "Analysis blocker", "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
+
+    add_manual_duplicate_issues(items, sprints, laps)
 
     review_rows = conn.execute(
         """
@@ -1142,6 +1140,103 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
             str(item["issue"]),
         ),
     )
+
+
+def add_manual_duplicate_issues(items: list[dict[str, object]], sprints: list[object], laps: list[object]) -> None:
+    for index, sprint in enumerate(sprints):
+        for candidate in sprints[index + 1:]:
+            score, reason = duplicate_score(
+                started_on=sprint.started_at or sprint.performed_on,
+                duration_seconds=minutes_to_seconds(sprint.duration_minutes),
+                raw_distance=sprint.device_distance,
+                candidate_date=candidate.performed_on,
+                candidate_started_at=candidate.started_at,
+                candidate_minutes=candidate.duration_minutes,
+                candidate_raw_distance=candidate.device_distance,
+                circuit_match=False,
+            )
+            if is_manual_duplicate_candidate(
+                score,
+                sprint.started_at,
+                candidate.started_at,
+                sprint.performed_on,
+                candidate.performed_on,
+                sprint.sprint_index,
+                candidate.sprint_index,
+            ):
+                add_entry_issue(
+                    items,
+                    "Sprint",
+                    sprint.performed_on,
+                    sprint.started_at,
+                    f"Sprint {sprint.sprint_index or sprint.id} and sprint {candidate.sprint_index or candidate.id}",
+                    "Analysis blocker",
+                    "Possible duplicate entry",
+                    reason or "Similar sprint entries were found.",
+                    f"/entries#sprint-{sprint.id}",
+                )
+
+    for index, lap in enumerate(laps):
+        for candidate in laps[index + 1:]:
+            if lap.circuit_id != candidate.circuit_id:
+                continue
+            score, reason = duplicate_score(
+                started_on=lap.started_at or lap.performed_on,
+                duration_seconds=minutes_to_seconds(lap.lap_time_minutes),
+                raw_distance=lap.device_distance,
+                candidate_date=candidate.performed_on,
+                candidate_started_at=candidate.started_at,
+                candidate_minutes=candidate.lap_time_minutes,
+                candidate_raw_distance=candidate.device_distance,
+                circuit_match=lap.circuit_id is not None,
+            )
+            if is_manual_duplicate_candidate(
+                score,
+                lap.started_at,
+                candidate.started_at,
+                lap.performed_on,
+                candidate.performed_on,
+                lap.lap_index,
+                candidate.lap_index,
+            ):
+                add_entry_issue(
+                    items,
+                    "Lap",
+                    lap.performed_on,
+                    lap.started_at,
+                    f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id} and lap {candidate.lap_index or candidate.id}",
+                    "Analysis blocker",
+                    "Possible duplicate entry",
+                    reason or "Similar lap entries were found.",
+                    f"/entries#lap-{lap.id}",
+                )
+
+
+def is_manual_duplicate_candidate(
+    score: float,
+    started_at: str | None,
+    candidate_started_at: str | None,
+    performed_on: str | None,
+    candidate_performed_on: str | None,
+    entry_index: int | None,
+    candidate_index: int | None,
+) -> bool:
+    if score < POSSIBLE_DUPLICATE_THRESHOLD:
+        same_date = date_part(performed_on) == date_part(candidate_performed_on)
+        same_index = entry_index is not None and entry_index == candidate_index
+        return same_date and same_index
+    delta = start_delta_minutes(started_at, candidate_started_at)
+    if delta is not None:
+        return delta <= 10 or score >= STRONG_DUPLICATE_THRESHOLD
+    same_date = date_part(performed_on) == date_part(candidate_performed_on)
+    same_index = entry_index == candidate_index
+    return same_date and same_index
+
+
+def minutes_to_seconds(minutes: float | None) -> int | None:
+    if minutes is None:
+        return None
+    return int(round(float(minutes) * 60))
 
 
 def maybe_add_issue(
@@ -1773,6 +1868,24 @@ def entry_select(form_id: str, name: str, options: str, required: bool = True) -
     return f'<select form="{escape(form_id)}" name="{escape(name)}"{required_attr}>{options}</select>'
 
 
+def lap_time_inputs(form_id: str, value: object) -> str:
+    minutes, seconds = lap_time_parts(value)
+    return (
+        entry_input(form_id, "lap_time_min", minutes, input_type="number", min_value="0", css_class="narrow")
+        + " "
+        + entry_input(
+            form_id,
+            "lap_time_sec",
+            seconds,
+            input_type="number",
+            step="1",
+            min_value="0",
+            max_value="59",
+            css_class="narrow",
+        )
+    )
+
+
 def readonly_cell(value: object) -> str:
     return f'<span class="readonly-cell">{escape("" if value is None else str(value))}</span>'
 
@@ -1823,6 +1936,7 @@ def line_chart(
         x = left_pad + index * x_step
         y = height - bottom_pad - ((value - v_min) / (v_max - v_min) * plot_height)
         coords.append((x, y))
+    grid_lines = chart_grid_lines(v_min, v_max, unit, left_pad, width - right_pad, top_pad, height - bottom_pad)
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
     circles = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{color}"/>' for x, y in coords)
     first_label = chart_edge_label(clean[0][0])
@@ -1830,8 +1944,7 @@ def line_chart(
     return f"""
 <svg class="{chart_class}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(display_title)}">
   <text x="18" y="24" fill="#17202a" font-size="15" font-weight="700">{escape(display_title)}</text>
-  <text x="8" y="{top_pad + 5}" fill="#5f6b7a" font-size="11">{escape(chart_axis_label(v_max, unit))}</text>
-  <text x="8" y="{height - bottom_pad}" fill="#5f6b7a" font-size="11">{escape(chart_axis_label(v_min, unit))}</text>
+  {grid_lines}
   <line x1="{left_pad}" y1="{height-bottom_pad}" x2="{width-right_pad}" y2="{height-bottom_pad}" stroke="#d9e2ec"/>
   <line x1="{left_pad}" y1="{top_pad}" x2="{left_pad}" y2="{height-bottom_pad}" stroke="#d9e2ec"/>
   <polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="3"/>
@@ -1839,6 +1952,28 @@ def line_chart(
   <text x="{left_pad}" y="{height - 8}" fill="#5f6b7a" font-size="11">{escape(first_label)}</text>
   <text x="{width - right_pad}" y="{height - 8}" fill="#5f6b7a" font-size="11" text-anchor="end">{escape(last_label)}</text>
 </svg>"""
+
+
+def chart_grid_lines(
+    v_min: float,
+    v_max: float,
+    unit: str,
+    x1: int,
+    x2: int,
+    y_top: int,
+    y_bottom: int,
+    count: int = 4,
+) -> str:
+    lines = []
+    for index in range(count):
+        value = v_min + ((v_max - v_min) * index / max(1, count - 1))
+        y = y_bottom - ((value - v_min) / (v_max - v_min) * (y_bottom - y_top))
+        lines.append(
+            f'<line class="chart-grid-line" x1="{x1}" y1="{y:.1f}" x2="{x2}" y2="{y:.1f}" stroke="#e7eef5"/>'
+            f'<text class="chart-axis-value" x="8" y="{y + 4:.1f}" fill="#5f6b7a" font-size="11">'
+            f'{escape(chart_axis_label(value, unit))}</text>'
+        )
+    return "\n  ".join(lines)
 
 
 def chart_axis_label(value: float, unit: str = "") -> str:
@@ -2517,7 +2652,7 @@ def promotion_device_watts(params: dict[str, str], payload: dict[str, object]) -
 
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
-    started_at = normalize_datetime(empty_to_none(params.get("started_at")))
+    started_at = combine_entry_start(performed_on, params.get("started_at"))
     resistance = validated_resistance(params.get("resistance"))
     conn.execute(
         """
@@ -2562,7 +2697,7 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
         """,
         (
             required(params, "performed_on"),
-            normalize_datetime(empty_to_none(params.get("started_at"))),
+            combine_entry_start(required(params, "performed_on"), params.get("started_at")),
             maybe_int(params.get("sprint_index")),
             maybe_float(params.get("duration_minutes")),
             maybe_float(params.get("rpm")),
@@ -2578,7 +2713,7 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
 
 def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
-    started_at = normalize_datetime(empty_to_none(params.get("started_at")))
+    started_at = combine_entry_start(performed_on, params.get("started_at"))
     circuit_id = maybe_int(params.get("circuit_id"))
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
@@ -2596,7 +2731,7 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             started_at,
             maybe_int(params.get("lap_index")),
             circuit_id,
-            maybe_float(params.get("lap_time_minutes")),
+            lap_time_minutes_from_params(params),
             maybe_int(params.get("hr")),
             resistance,
             maybe_float(params.get("rpm")),
@@ -2626,10 +2761,10 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
         """,
         (
             required(params, "performed_on"),
-            normalize_datetime(empty_to_none(params.get("started_at"))),
+            combine_entry_start(required(params, "performed_on"), params.get("started_at")),
             maybe_int(params.get("lap_index")),
             circuit_id,
-            maybe_float(params.get("lap_time_minutes")),
+            lap_time_minutes_from_params(params),
             maybe_int(params.get("hr")),
             validated_resistance(params.get("resistance")),
             maybe_float(params.get("rpm")),
@@ -2954,14 +3089,27 @@ def fmt_start_time(value: object) -> str:
     return text
 
 
-def datetime_local_value(value: object) -> str:
+def time_input_value(value: object) -> str:
     if value in (None, ""):
         return ""
     text = str(value)
     parsed = parse_datetime(text)
     if parsed is not None and has_time_component(text):
-        return parsed.strftime("%Y-%m-%dT%H:%M")
-    return normalize_datetime(text) or ""
+        return parsed.strftime("%H:%M")
+    if ":" in text:
+        return text[:5]
+    return ""
+
+
+def combine_entry_start(performed_on: str, value: FormValue | None) -> str | None:
+    start = empty_to_none(value)
+    if start is None:
+        return None
+    if has_time_component(start):
+        return normalize_datetime(start)
+    if ":" in start:
+        return f"{performed_on}T{start[:5]}"
+    return normalize_datetime(start)
 
 
 def entry_resistance_value(value: object) -> int:
@@ -3031,6 +3179,29 @@ def date_part(value: str | None) -> str | None:
     if len(cleaned) < 10:
         return None
     return cleaned[:10]
+
+
+def lap_time_minutes_from_params(params: dict[str, str]) -> float | None:
+    existing = maybe_float(params.get("lap_time_minutes"))
+    if existing is not None:
+        return existing
+    minutes = maybe_int(params.get("lap_time_min"))
+    seconds = maybe_int(params.get("lap_time_sec"))
+    if minutes is None and seconds is None:
+        return None
+    minutes = minutes or 0
+    seconds = seconds or 0
+    if seconds < 0 or seconds > 59:
+        raise ValueError("Lap seconds must be between 0 and 59.")
+    return minutes + (seconds / 60)
+
+
+def lap_time_parts(value: object) -> tuple[str, str]:
+    if value in (None, ""):
+        return "", ""
+    total_seconds = int(round(float(value) * 60))
+    minutes, seconds = divmod(total_seconds, 60)
+    return str(minutes), str(seconds)
 
 
 def maybe_float(value: str | None) -> float | None:

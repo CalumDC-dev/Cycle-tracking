@@ -81,7 +81,7 @@ class WebActionTests(unittest.TestCase):
             self.conn,
             {
                 "performed_on": "2026-05-02",
-                "started_at": "2026-05-02T07:30",
+                "started_at": "07:30",
                 "day_number": "2",
                 "sprint_index": "1",
                 "duration_minutes": "5",
@@ -105,10 +105,11 @@ class WebActionTests(unittest.TestCase):
             self.conn,
             {
                 "performed_on": "2026-05-02",
-                "started_at": "2026-05-02T07:45",
+                "started_at": "07:45",
                 "lap_index": "1",
                 "circuit_id": "1",
-                "lap_time_minutes": "4",
+                "lap_time_min": "4",
+                "lap_time_sec": "12",
                 "hr": "115",
                 "resistance": "4",
                 "rpm": "100",
@@ -119,7 +120,8 @@ class WebActionTests(unittest.TestCase):
         lap = calculated_laps(self.conn)[0]
         self.assertEqual(lap.circuit_name, "Manual Circuit")
         self.assertEqual(lap.started_at, "2026-05-02T07:45")
-        self.assertAlmostEqual(lap.average_speed, 30.0)
+        self.assertAlmostEqual(lap.lap_time_minutes, 4.2)
+        self.assertAlmostEqual(lap.average_speed, 28.5714285714)
 
     def test_add_lap_entry_rejects_missing_circuit(self):
         with self.assertRaises(ValueError):
@@ -223,8 +225,40 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('/entries/lap/update', html)
         self.assertIn('name="sprint_index"', html)
         self.assertIn('name="lap_index"', html)
+        self.assertIn('type="time"', html)
+        self.assertIn('name="lap_time_min"', html)
+        self.assertIn('name="lap_time_sec"', html)
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
+
+    def test_maintenance_flags_possible_manual_duplicate_entries(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:30",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:31",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+
+        items = maintenance_items(self.conn)
+        duplicate_items = [item for item in items if item["issue"] == "Possible duplicate entry"]
+
+        self.assertEqual(len(duplicate_items), 1)
+        self.assertEqual(duplicate_items[0]["category"], "Analysis blocker")
+        self.assertIn("start time within 2 minutes", duplicate_items[0]["detail"])
 
     def test_maintenance_flags_missing_entry_fields_and_review_items(self):
         add_sprint_entry(
@@ -346,6 +380,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Open larger chart", html)
         self.assertIn("chart-large", html)
         self.assertIn('viewBox="0 0 1000 667"', html)
+        self.assertIn("chart-grid-line", html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)
