@@ -341,6 +341,10 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Strength Signals", html)
         self.assertIn("Resistance Calibration Coverage", html)
         self.assertIn("Best 5 minute estimated watts", html)
+        self.assertIn("Estimated Watts (W)", html)
+        self.assertIn("Heart Rate (bpm)", html)
+        self.assertIn("Open larger chart", html)
+        self.assertIn("chart-large", html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)

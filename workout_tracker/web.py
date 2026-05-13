@@ -131,6 +131,25 @@ svg.chart {
   border-radius: 8px;
   background: #fff;
 }
+svg.chart-large {
+  height: 360px;
+}
+.chart-panel {
+  display: grid;
+  gap: 8px;
+}
+.chart-panel details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+}
+.chart-panel summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-weight: 700;
+  margin-bottom: 8px;
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -844,10 +863,10 @@ def render_insights(conn: sqlite3.Connection) -> str:
 <section class="band">
   <h2>Sprint Trends</h2>
   <div class="grid-two">
-    {line_chart("Estimated Watts", sprint_watts, "#1f5a85")}
-    {line_chart("RPM", sprint_rpm, "#2f7d59")}
-    {line_chart("HR", sprint_hr, "#a33b3b")}
-    {line_chart("Best 5 Minute Estimated Watts", source_metric_points(source_rows, "best_300s_watts"), "#a66200")}
+    {chart_panel("Estimated Watts", sprint_watts, "#1f5a85", "W")}
+    {chart_panel("Cadence", sprint_rpm, "#2f7d59", "rpm")}
+    {chart_panel("Heart Rate", sprint_hr, "#a33b3b", "bpm")}
+    {chart_panel("Best 5 Minute Estimated Watts", source_metric_points(source_rows, "best_300s_watts"), "#a66200", "W")}
   </div>
 </section>
 <section class="band">
@@ -1760,32 +1779,75 @@ def metric(label: str, value: object, tone: str = "blue") -> str:
     return f'<div class="metric {tone}"><span>{escape(label)}</span><strong>{escape(str(value))}</strong></div>'
 
 
-def line_chart(title: str, points: list[tuple[str, float | None]], color: str) -> str:
+def chart_panel(title: str, points: list[tuple[str, float | None]], color: str, unit: str = "") -> str:
+    return f"""
+<div class="chart-panel">
+  {line_chart(title, points, color, unit=unit)}
+  <details>
+    <summary>Open larger chart</summary>
+    {line_chart(title, points, color, unit=unit, large=True)}
+  </details>
+</div>"""
+
+
+def line_chart(
+    title: str,
+    points: list[tuple[str, float | None]],
+    color: str,
+    *,
+    unit: str = "",
+    large: bool = False,
+) -> str:
+    display_title = f"{title} ({unit})" if unit else title
+    chart_class = "chart chart-large" if large else "chart"
     clean = [(label, float(value)) for label, value in points if value is not None]
     if not clean:
-        return f'<svg class="chart" role="img" aria-label="{escape(title)}"></svg>'
-    width, height, pad = 680, 220, 28
+        return f'<svg class="{chart_class}" role="img" aria-label="{escape(display_title)}"></svg>'
+    width, height = (900, 340) if large else (680, 220)
+    left_pad, right_pad, top_pad, bottom_pad = 56, 18, 34, 30
     values = [value for _, value in clean]
     v_min, v_max = min(values), max(values)
     if v_min == v_max:
         v_min -= 1
         v_max += 1
-    x_step = (width - pad * 2) / max(1, len(clean) - 1)
+    x_step = (width - left_pad - right_pad) / max(1, len(clean) - 1)
+    plot_height = height - top_pad - bottom_pad
     coords = []
     for index, (_, value) in enumerate(clean):
-        x = pad + index * x_step
-        y = height - pad - ((value - v_min) / (v_max - v_min) * (height - pad * 2))
+        x = left_pad + index * x_step
+        y = height - bottom_pad - ((value - v_min) / (v_max - v_min) * plot_height)
         coords.append((x, y))
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
     circles = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{color}"/>' for x, y in coords)
+    first_label = chart_edge_label(clean[0][0])
+    last_label = chart_edge_label(clean[-1][0])
     return f"""
-<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">
-  <text x="18" y="24" fill="#17202a" font-size="15" font-weight="700">{escape(title)}</text>
-  <line x1="{pad}" y1="{height-pad}" x2="{width-pad}" y2="{height-pad}" stroke="#d9e2ec"/>
-  <line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height-pad}" stroke="#d9e2ec"/>
+<svg class="{chart_class}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(display_title)}">
+  <text x="18" y="24" fill="#17202a" font-size="15" font-weight="700">{escape(display_title)}</text>
+  <text x="8" y="{top_pad + 5}" fill="#5f6b7a" font-size="11">{escape(chart_axis_label(v_max, unit))}</text>
+  <text x="8" y="{height - bottom_pad}" fill="#5f6b7a" font-size="11">{escape(chart_axis_label(v_min, unit))}</text>
+  <line x1="{left_pad}" y1="{height-bottom_pad}" x2="{width-right_pad}" y2="{height-bottom_pad}" stroke="#d9e2ec"/>
+  <line x1="{left_pad}" y1="{top_pad}" x2="{left_pad}" y2="{height-bottom_pad}" stroke="#d9e2ec"/>
   <polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="3"/>
   {circles}
+  <text x="{left_pad}" y="{height - 8}" fill="#5f6b7a" font-size="11">{escape(first_label)}</text>
+  <text x="{width - right_pad}" y="{height - 8}" fill="#5f6b7a" font-size="11" text-anchor="end">{escape(last_label)}</text>
 </svg>"""
+
+
+def chart_axis_label(value: float, unit: str = "") -> str:
+    digits = 0 if abs(value) >= 10 else 1
+    label = fmt_num(value, digits)
+    return f"{label} {unit}".strip()
+
+
+def chart_edge_label(label: object) -> str:
+    text = str(label)
+    if "T" in text:
+        return text.split("T", 1)[0]
+    if " " in text:
+        return text.split(" ", 1)[0]
+    return text[:16]
 
 
 def source_metric_points(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
