@@ -345,6 +345,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Heart Rate (bpm)", html)
         self.assertIn("Open larger chart", html)
         self.assertIn("chart-large", html)
+        self.assertIn('viewBox="0 0 1000 667"', html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)

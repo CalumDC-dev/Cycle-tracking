@@ -132,11 +132,16 @@ svg.chart {
   background: #fff;
 }
 svg.chart-large {
-  height: 360px;
+  aspect-ratio: 3 / 2;
+  height: auto;
+  min-height: 300px;
 }
 .chart-panel {
   display: grid;
   gap: 8px;
+}
+.chart-panel:has(details[open]) {
+  grid-column: 1 / -1;
 }
 .chart-panel details {
   border: 1px solid var(--line);
@@ -267,6 +272,7 @@ button.secondary {
 @media (max-width: 720px) {
   main { padding: 14px; }
   form.inline { grid-template-columns: 1fr; }
+  svg.chart-large { min-height: 360px; }
   table { font-size: 13px; }
 }
 """
@@ -1803,7 +1809,7 @@ def line_chart(
     clean = [(label, float(value)) for label, value in points if value is not None]
     if not clean:
         return f'<svg class="{chart_class}" role="img" aria-label="{escape(display_title)}"></svg>'
-    width, height = (900, 340) if large else (680, 220)
+    width, height = (1000, 667) if large else (680, 220)
     left_pad, right_pad, top_pad, bottom_pad = 56, 18, 34, 30
     values = [value for _, value in clean]
     v_min, v_max = min(values), max(values)
