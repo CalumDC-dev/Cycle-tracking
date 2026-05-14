@@ -1429,7 +1429,7 @@ def render_review(conn: sqlite3.Connection) -> str:
   <h2>Import Activity File</h2>
   <form class="stack" method="post" action="/review/import-file" enctype="multipart/form-data">
     <label>Source<input name="source" value="strava" required></label>
-    <label>Activity file<input name="activity_upload" type="file" accept=".csv,.json,.tcx,.gz,.zip"></label>
+    <label>Activity file<input name="activity_upload" type="file" accept=".csv,.json,.tcx,.fit,.gz,.zip"></label>
     <label>Folder or path<input name="activity_file" placeholder="exports/activities"></label>
     <button type="submit">Import file</button>
   </form>
@@ -2609,6 +2609,8 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
     if row is None:
         raise ValueError("Raw activity was not found.")
+    if row["review_status"] == "imported" and raw_activity_has_entry(conn, raw_id):
+        return
     if row["review_status"] in ("already_logged", "imported"):
         raise ValueError("Raw activity has already been handled.")
     if raw_activity_has_entry(conn, raw_id):
