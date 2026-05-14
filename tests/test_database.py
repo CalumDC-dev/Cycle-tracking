@@ -68,10 +68,17 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("duplicate_reason", raw_columns)
         self.assertIn("started_at", sprint_columns)
         self.assertIn("started_at", lap_columns)
+        self.assertTrue(self._table_exists(conn, "duplicate_dismissals"))
         conn.close()
 
     def _columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    def _table_exists(self, conn: sqlite3.Connection, table: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone() is not None
 
 
 if __name__ == "__main__":

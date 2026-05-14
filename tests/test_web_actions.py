@@ -17,19 +17,25 @@ from workout_tracker.web import (
     editable_calibration_profile,
     add_circuit,
     confirm_duplicate_activity,
+    delete_entry,
+    dismiss_duplicate_pair,
     find_activity_duplicate,
     grouped_table,
     import_activity_file_to_review,
     parse_post_params,
     populate_missing_duplicate_hr,
+    render_insights,
     render_entries,
     render_maintenance,
     review_actions,
+    calibration_coverage_rows,
+    circuit_progress_rows,
     maintenance_items,
     promote_activity_form,
     promote_raw_activity,
     raw_activity_has_entry,
     classify_activity,
+    strength_signal_rows,
     update_circuit,
     update_calibration_profile,
     update_lap_entry,
@@ -77,7 +83,7 @@ class WebActionTests(unittest.TestCase):
             self.conn,
             {
                 "performed_on": "2026-05-02",
-                "started_at": "2026-05-02T07:30",
+                "started_at": "07:30",
                 "day_number": "2",
                 "sprint_index": "1",
                 "duration_minutes": "5",
@@ -101,10 +107,10 @@ class WebActionTests(unittest.TestCase):
             self.conn,
             {
                 "performed_on": "2026-05-02",
-                "started_at": "2026-05-02T07:45",
+                "started_at": "07:45",
                 "lap_index": "1",
                 "circuit_id": "1",
-                "lap_time_minutes": "4",
+                "lap_time_minutes": "4:12",
                 "hr": "115",
                 "resistance": "4",
                 "rpm": "100",
@@ -115,7 +121,21 @@ class WebActionTests(unittest.TestCase):
         lap = calculated_laps(self.conn)[0]
         self.assertEqual(lap.circuit_name, "Manual Circuit")
         self.assertEqual(lap.started_at, "2026-05-02T07:45")
-        self.assertAlmostEqual(lap.average_speed, 30.0)
+        self.assertAlmostEqual(lap.lap_time_minutes, 4.2)
+        self.assertAlmostEqual(lap.average_speed, 28.5714285714)
+
+    def test_add_lap_entry_accepts_hour_duration_format(self):
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "circuit_id": "1",
+                "lap_time_minutes": "1:02:30",
+            },
+        )
+
+        lap = calculated_laps(self.conn)[0]
+        self.assertAlmostEqual(lap.lap_time_minutes, 62.5)
 
     def test_add_lap_entry_rejects_missing_circuit(self):
         with self.assertRaises(ValueError):
@@ -183,7 +203,7 @@ class WebActionTests(unittest.TestCase):
                 "started_at": "2026-05-02T07:45",
                 "lap_index": "2",
                 "circuit_id": "1",
-                "lap_time_minutes": "4",
+                "lap_time_minutes": "4:30",
                 "hr": "115",
                 "resistance": "4",
                 "rpm": "100",
@@ -194,6 +214,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(lap.started_at, "2026-05-02T07:45")
         self.assertEqual(lap.lap_index, 2)
         self.assertEqual(lap.resistance, 4)
+        self.assertAlmostEqual(lap.lap_time_minutes, 4.5)
 
     def test_render_entries_has_inline_edit_forms_with_resistance_defaults(self):
         add_sprint_entry(
@@ -219,8 +240,117 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('/entries/lap/update', html)
         self.assertIn('name="sprint_index"', html)
         self.assertIn('name="lap_index"', html)
+        self.assertIn('type="time"', html)
+        self.assertIn('name="lap_time_minutes"', html)
+        self.assertIn('value="4:00"', html)
+        self.assertNotIn('name="lap_time_sec"', html)
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
+
+    def test_maintenance_flags_possible_manual_duplicate_entries(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:30",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:31",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+
+        items = maintenance_items(self.conn)
+        duplicate_items = [item for item in items if item["issue"] == "Possible duplicate entry"]
+
+        self.assertEqual(len(duplicate_items), 1)
+        self.assertEqual(duplicate_items[0]["category"], "Analysis blocker")
+        self.assertIn("start time within 2 minutes", duplicate_items[0]["detail"])
+        html = render_maintenance(self.conn)
+        self.assertIn('/entries/delete', html)
+        self.assertIn('/maintenance/not-duplicate', html)
+        self.assertIn('name="entry_type" value="sprint"', html)
+        self.assertIn("Delete sprint 1", html)
+        self.assertIn("Not duplicate", html)
+
+    def test_maintenance_can_dismiss_false_positive_manual_duplicate(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:30",
+                "sprint_index": "1",
+                "duration_minutes": "15",
+                "device_distance": "5",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "08:00",
+                "sprint_index": "2",
+                "duration_minutes": "15",
+                "device_distance": "5",
+            },
+        )
+        ids = [
+            row["id"]
+            for row in self.conn.execute("SELECT id FROM sprint_entries ORDER BY id").fetchall()
+        ]
+        self.assertIn("Possible duplicate entry", [item["issue"] for item in maintenance_items(self.conn)])
+
+        dismiss_duplicate_pair(
+            self.conn,
+            {"entry_type": "sprint", "first_id": str(ids[1]), "second_id": str(ids[0])},
+        )
+
+        self.assertNotIn("Possible duplicate entry", [item["issue"] for item in maintenance_items(self.conn)])
+        dismissal = self.conn.execute(
+            "SELECT entry_type, first_entry_id, second_entry_id FROM duplicate_dismissals"
+        ).fetchone()
+        self.assertEqual(dict(dismissal), {"entry_type": "sprint", "first_entry_id": ids[0], "second_entry_id": ids[1]})
+
+    def test_delete_entry_removes_manual_duplicate(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:30",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:31",
+                "sprint_index": "1",
+                "duration_minutes": "5",
+                "device_distance": "2",
+            },
+        )
+        duplicate_id = self.conn.execute(
+            "SELECT id FROM sprint_entries ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+
+        delete_entry(self.conn, {"entry_type": "sprint", "id": str(duplicate_id)})
+
+        remaining = self.conn.execute("SELECT COUNT(*) AS total FROM sprint_entries").fetchone()["total"]
+        issues = [item["issue"] for item in maintenance_items(self.conn)]
+        self.assertEqual(remaining, 1)
+        self.assertNotIn("Possible duplicate entry", issues)
 
     def test_maintenance_flags_missing_entry_fields_and_review_items(self):
         add_sprint_entry(
@@ -257,6 +387,92 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("/entries#sprint-", html)
         self.assertIn("/review", html)
         self.assertIn("/export/backup.zip", html)
+
+    def test_render_insights_summarises_progress_strength_and_calibration(self):
+        add_resistance_calibration_test(
+            self.conn,
+            {
+                "tested_on": "2026-05-03",
+                "resistance": "8",
+                "duration_minutes": "5",
+                "device_watts": "500",
+                "expected_watts": "60",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-04",
+                "started_at": "2026-05-04T07:30",
+                "sprint_index": "1",
+                "duration_minutes": "10",
+                "rpm": "80",
+                "device_watts": "500",
+                "hr": "120",
+                "resistance": "8",
+                "device_distance": "3",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-04",
+                "started_at": "2026-05-04T07:45",
+                "lap_index": "1",
+                "circuit_id": "1",
+                "lap_time_minutes": "5",
+                "hr": "120",
+                "resistance": "4",
+                "rpm": "100",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-05",
+                "started_at": "2026-05-05T07:45",
+                "lap_index": "1",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+                "hr": "120",
+                "resistance": "4",
+                "rpm": "100",
+            },
+        )
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "metric-source",
+                "started_on": "2026-05-04T07:30",
+                "review_status": "already_logged",
+                "session_type": "sprint",
+                "raw_payload": json.dumps({"average_watts": 500, "best_300s_watts": 480, "average_cadence": 80}),
+            },
+        )
+
+        sprints = calculated_sprints(self.conn)
+        laps = calculated_laps(self.conn)
+        circuit_rows = circuit_progress_rows(laps)
+        strength_rows = strength_signal_rows(sprints, laps)
+        coverage_rows = calibration_coverage_rows(self.conn)
+        html = render_insights(self.conn)
+
+        self.assertEqual(circuit_rows[0]["circuit"], "Manual Circuit")
+        self.assertAlmostEqual(circuit_rows[0]["change_minutes"], 1.0)
+        self.assertEqual(strength_rows[0]["resistance"], 8)
+        self.assertEqual(coverage_rows[7]["resistance"], 8)
+        self.assertAlmostEqual(coverage_rows[7]["scaling"], 0.12)
+        self.assertIn("Circuit Progress", html)
+        self.assertIn("Strength Signals", html)
+        self.assertIn("Resistance Calibration Coverage", html)
+        self.assertIn("Best 5 minute estimated watts", html)
+        self.assertIn("Estimated Watts (W)", html)
+        self.assertIn("Heart Rate (bpm)", html)
+        self.assertIn("Open larger chart", html)
+        self.assertIn("chart-large", html)
+        self.assertIn('viewBox="0 0 1000 667"', html)
+        self.assertIn("chart-grid-line", html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)

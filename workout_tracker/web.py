@@ -131,6 +131,30 @@ svg.chart {
   border-radius: 8px;
   background: #fff;
 }
+svg.chart-large {
+  aspect-ratio: 3 / 2;
+  height: auto;
+  min-height: 300px;
+}
+.chart-panel {
+  display: grid;
+  gap: 8px;
+}
+.chart-panel:has(details[open]) {
+  grid-column: 1 / -1;
+}
+.chart-panel details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+}
+.chart-panel summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-weight: 700;
+  margin-bottom: 8px;
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -248,6 +272,7 @@ button.secondary {
 @media (max-width: 720px) {
   main { padding: 14px; }
   form.inline { grid-template-columns: 1fr; }
+  svg.chart-large { min-height: 360px; }
   table { font-size: 13px; }
 }
 """
@@ -297,6 +322,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/maintenance":
                 conn = self._conn()
                 self._html("Maintenance", render_maintenance(conn), "maintenance")
+            elif parsed.path == "/insights":
+                conn = self._conn()
+                self._html("Insights", render_insights(conn), "insights")
             elif parsed.path == "/review":
                 conn = self._conn()
                 self._html("Review", render_review(conn), "review")
@@ -336,6 +364,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/confirm-duplicate":
                 confirm_duplicate_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/maintenance/not-duplicate":
+                dismiss_duplicate_pair(conn, params)
+                self._redirect("/maintenance")
             elif parsed.path == "/review/promote":
                 promote_raw_activity(conn, params)
                 self._redirect("/review")
@@ -351,6 +382,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/entries/lap/update":
                 update_lap_entry(conn, params)
                 self._redirect("/entries")
+            elif parsed.path == "/entries/delete":
+                delete_entry(conn, params)
+                self._redirect("/maintenance")
             elif parsed.path == "/calibration/profile/update":
                 update_calibration_profile(conn, params)
                 self._redirect("/calibration")
@@ -457,6 +491,7 @@ def page(title: str, body: str, active: str) -> str:
         ("circuits", "/circuits", "Circuits"),
         ("calibration", "/calibration", "Calibration"),
         ("maintenance", "/maintenance", "Maintenance"),
+        ("insights", "/insights", "Insights"),
         ("review", "/review", "Review"),
     ]
     links = "".join(
@@ -569,7 +604,7 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <h2>Add Sprint Entry</h2>
   <form class="stack" method="post" action="/entries/sprint/add">
     <label>Date<input name="performed_on" type="date" required></label>
-    <label>Start time<input name="started_at" type="datetime-local"></label>
+    <label>Start time<input name="started_at" type="time"></label>
     <label>Day number<input name="day_number" type="number" min="1"></label>
     <label>Sprint number<input name="sprint_index" type="number" min="1"></label>
     <label>Duration minutes<input name="duration_minutes" type="number" step="0.001" min="0"></label>
@@ -586,11 +621,11 @@ def render_entries(conn: sqlite3.Connection) -> str:
   <h2>Add Lap Entry</h2>
   <form class="stack" method="post" action="/entries/lap/add">
     <label>Date<input name="performed_on" type="date" required></label>
-    <label>Start time<input name="started_at" type="datetime-local"></label>
+    <label>Start time<input name="started_at" type="time"></label>
     <label>Lap number<input name="lap_index" type="number" min="1"></label>
     <label>Circuit<select name="circuit_id" required id="lap-circuit">{circuit_select_options(circuits)}</select></label>
     <label>Kinomap goal<input id="lap-goal" readonly></label>
-    <label>Lap time minutes<input name="lap_time_minutes" type="number" step="0.001" min="0"></label>
+    <label>Lap time<input name="lap_time_minutes" placeholder="1:30"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
@@ -621,7 +656,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
                 sprint.performed_on,
                 [
                     entry_input(form_id, "performed_on", sprint.performed_on, input_type="date", required=True),
-                    entry_input(form_id, "started_at", datetime_local_value(sprint.started_at), input_type="datetime-local"),
+                    entry_input(form_id, "started_at", time_input_value(sprint.started_at), input_type="time"),
                     entry_input(form_id, "sprint_index", fmt_raw(sprint.sprint_index), input_type="number", min_value="1", css_class="narrow"),
                     entry_input(
                         form_id,
@@ -689,17 +724,10 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
                 lap.performed_on,
                 [
                     entry_input(form_id, "performed_on", lap.performed_on, input_type="date", required=True),
-                    entry_input(form_id, "started_at", datetime_local_value(lap.started_at), input_type="datetime-local"),
+                    entry_input(form_id, "started_at", time_input_value(lap.started_at), input_type="time"),
                     entry_input(form_id, "lap_index", fmt_raw(lap.lap_index), input_type="number", min_value="1", css_class="narrow"),
                     entry_select(form_id, "circuit_id", circuit_select_options(circuits, lap.circuit_id), required=True),
-                    entry_input(
-                        form_id,
-                        "lap_time_minutes",
-                        step_value(lap.lap_time_minutes, 3),
-                        input_type="number",
-                        step="0.001",
-                        min_value="0",
-                    ),
+                    entry_input(form_id, "lap_time_minutes", duration_entry_value(lap.lap_time_minutes)),
                     readonly_cell(fmt_num(lap.length, 3)),
                     readonly_cell(fmt_num(lap.average_speed, 2)),
                     entry_input(form_id, "hr", fmt_raw(lap.hr), input_type="number", min_value="0", css_class="narrow"),
@@ -812,6 +840,177 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
 """
 
 
+def render_insights(conn: sqlite3.Connection) -> str:
+    sprints = calculated_sprints(conn)
+    laps = calculated_laps(conn)
+    source_rows = source_metric_rows(conn)
+    circuit_rows = circuit_progress_rows(laps)
+    strength_rows = strength_signal_rows(sprints, laps)
+    calibration_rows = calibration_coverage_rows(conn)
+    sprint_watts = [
+        (sprint.started_at or sprint.performed_on, sprint.estimated_watts)
+        for sprint in sprints
+        if sprint.estimated_watts is not None
+    ]
+    sprint_rpm = [(sprint.started_at or sprint.performed_on, sprint.rpm) for sprint in sprints if sprint.rpm is not None]
+    sprint_hr = [(sprint.started_at or sprint.performed_on, sprint.hr) for sprint in sprints if sprint.hr is not None]
+    return f"""
+<section class="band">
+  <h2>Insight Summary</h2>
+  <div class="metrics">
+    {metric("Circuits tracked", len(circuit_rows), "green")}
+    {metric("Best circuit gain", best_circuit_gain(circuit_rows), "green")}
+    {metric("Best sprint watts", fmt_num(max_sprint_watts(sprints), 1), "amber")}
+    {metric("Strength signals", len(strength_rows), "blue")}
+    {metric("Calibrated levels", calibrated_resistance_count(calibration_rows), "blue")}
+  </div>
+</section>
+<section class="band">
+  <h2>Sprint Trends</h2>
+  <div class="grid-two">
+    {chart_panel("Estimated Watts", sprint_watts, "#1f5a85", "W")}
+    {chart_panel("Cadence", sprint_rpm, "#2f7d59", "rpm")}
+    {chart_panel("Heart Rate", sprint_hr, "#a33b3b", "bpm")}
+    {chart_panel("Best 5 Minute Estimated Watts", source_metric_points(source_rows, "best_300s_watts"), "#a66200", "W")}
+  </div>
+</section>
+<section class="band">
+  <h2>Circuit Progress</h2>
+  {circuit_progress_table(circuit_rows)}
+</section>
+<section class="band">
+  <h2>Source Highlights</h2>
+  {source_highlights_table(source_rows)}
+</section>
+<section class="band">
+  <h2>Strength Signals</h2>
+  {strength_signals_table(strength_rows)}
+</section>
+<section class="band">
+  <h2>Resistance Calibration Coverage</h2>
+  {calibration_coverage_table(calibration_rows)}
+</section>
+"""
+
+
+def circuit_progress_rows(laps: list[object]) -> list[dict[str, object]]:
+    grouped: dict[str, list[object]] = {}
+    for lap in laps:
+        if not lap.circuit_name or lap.lap_time_minutes is None:
+            continue
+        grouped.setdefault(str(lap.circuit_name), []).append(lap)
+
+    rows = []
+    for circuit_name, circuit_laps in grouped.items():
+        ordered = sorted(circuit_laps, key=lambda lap: (lap.performed_on, lap.started_at or "", lap.id))
+        times = [float(lap.lap_time_minutes) for lap in ordered if lap.lap_time_minutes is not None]
+        if not times:
+            continue
+        first = ordered[0]
+        latest = ordered[-1]
+        best = min(ordered, key=lambda lap: lap.lap_time_minutes or 999999)
+        rows.append({
+            "circuit": circuit_name,
+            "laps": len(ordered),
+            "first_time": first.lap_time_minutes,
+            "latest_time": latest.lap_time_minutes,
+            "best_time": best.lap_time_minutes,
+            "average_time": average_value(times),
+            "change_minutes": (
+                float(first.lap_time_minutes) - float(latest.lap_time_minutes)
+                if first.lap_time_minutes is not None and latest.lap_time_minutes is not None
+                else None
+            ),
+            "best_date": best.performed_on,
+            "latest_date": latest.performed_on,
+        })
+    return sorted(rows, key=lambda row: str(row["circuit"]))
+
+
+def strength_signal_rows(sprints: list[object], laps: list[object]) -> list[dict[str, object]]:
+    rows = []
+    for sprint in sprints:
+        if is_strength_signal(sprint.resistance, sprint.rpm):
+            rows.append({
+                "date": sprint.performed_on,
+                "start": fmt_start_time(sprint.started_at),
+                "type": "Sprint",
+                "label": f"Sprint {sprint.sprint_index or sprint.id}",
+                "resistance": sprint.resistance,
+                "rpm": sprint.rpm,
+                "estimated_watts": sprint.estimated_watts,
+                "hr": sprint.hr,
+                "minutes": sprint.duration_minutes,
+                "calories": sprint.calories_mets,
+            })
+    for lap in laps:
+        if is_strength_signal(lap.resistance, lap.rpm):
+            rows.append({
+                "date": lap.performed_on,
+                "start": fmt_start_time(lap.started_at),
+                "type": "Lap",
+                "label": lap.circuit_name or f"Lap {lap.lap_index or lap.id}",
+                "resistance": lap.resistance,
+                "rpm": lap.rpm,
+                "estimated_watts": None,
+                "hr": lap.hr,
+                "minutes": lap.lap_time_minutes,
+                "calories": lap.calories_mets,
+            })
+    return sorted(rows, key=lambda row: (str(row["date"]), str(row["start"]), str(row["type"])))
+
+
+def is_strength_signal(resistance: object, rpm: object, min_resistance: int = 7, max_rpm: int = 95) -> bool:
+    if resistance is None or rpm is None:
+        return False
+    return int(resistance) >= min_resistance and float(rpm) <= max_rpm
+
+
+def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    scaling = {
+        int(row["resistance"]): row["scaling"]
+        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+    }
+    tests = {
+        int(row["resistance"]): row
+        for row in conn.execute(
+            """
+            SELECT resistance, COUNT(*) AS tests, MAX(tested_on) AS last_tested
+            FROM resistance_calibration_tests
+            GROUP BY resistance
+            """
+        ).fetchall()
+    }
+    sprint_counts = resistance_counts(conn, "sprint_entries")
+    lap_counts = resistance_counts(conn, "lap_entries")
+    rows = []
+    for resistance in range(1, 13):
+        test_row = tests.get(resistance)
+        rows.append({
+            "resistance": resistance,
+            "scaling": scaling.get(resistance),
+            "sprint_sessions": sprint_counts.get(resistance, 0),
+            "lap_sessions": lap_counts.get(resistance, 0),
+            "calibration_tests": int(test_row["tests"]) if test_row else 0,
+            "last_tested": test_row["last_tested"] if test_row else "",
+        })
+    return rows
+
+
+def resistance_counts(conn: sqlite3.Connection, table_name: str) -> dict[int, int]:
+    if table_name not in {"sprint_entries", "lap_entries"}:
+        raise ValueError("Unsupported table for resistance counts.")
+    rows = conn.execute(
+        f"""
+        SELECT resistance, COUNT(*) AS sessions
+        FROM {table_name}
+        WHERE resistance IS NOT NULL
+        GROUP BY resistance
+        """
+    ).fetchall()
+    return {int(row["resistance"]): int(row["sessions"]) for row in rows}
+
+
 def render_maintenance(conn: sqlite3.Connection) -> str:
     items = maintenance_items(conn)
     review_count = sum(1 for item in items if item["area"] == "Review")
@@ -848,7 +1047,9 @@ def render_maintenance(conn: sqlite3.Connection) -> str:
 
 def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
-    for sprint in calculated_sprints(conn):
+    sprints = calculated_sprints(conn)
+    laps = calculated_laps(conn)
+    for sprint in sprints:
         context = f"Sprint {sprint.sprint_index or sprint.id}"
         action = f"/entries#sprint-{sprint.id}"
         maybe_add_issue(
@@ -880,7 +1081,7 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
         if sprint.resistance is not None and sprint.device_watts is not None and sprint.estimated_watts is None:
             add_entry_issue(items, "Sprint", sprint.performed_on, sprint.started_at, context, "Analysis blocker", "Missing resistance factor", "Add a scaling factor for this resistance level.", f"/calibration")
 
-    for lap in calculated_laps(conn):
+    for lap in laps:
         context = f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id}"
         action = f"/entries#lap-{lap.id}"
         maybe_add_issue(
@@ -909,6 +1110,8 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
         )
         if lap.hr is not None and lap.lap_time_minutes is not None and lap.calories_mets is None:
             add_entry_issue(items, "Lap", lap.performed_on, lap.started_at, context, "Analysis blocker", "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
+
+    add_manual_duplicate_issues(conn, items, sprints, laps)
 
     review_rows = conn.execute(
         """
@@ -944,6 +1147,116 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
     )
 
 
+def add_manual_duplicate_issues(
+    conn: sqlite3.Connection,
+    items: list[dict[str, object]],
+    sprints: list[object],
+    laps: list[object],
+) -> None:
+    dismissed_sprints = dismissed_duplicate_pairs(conn, "sprint")
+    for index, sprint in enumerate(sprints):
+        for candidate in sprints[index + 1:]:
+            if duplicate_pair_key(sprint.id, candidate.id) in dismissed_sprints:
+                continue
+            score, reason = duplicate_score(
+                started_on=sprint.started_at or sprint.performed_on,
+                duration_seconds=minutes_to_seconds(sprint.duration_minutes),
+                raw_distance=sprint.device_distance,
+                candidate_date=candidate.performed_on,
+                candidate_started_at=candidate.started_at,
+                candidate_minutes=candidate.duration_minutes,
+                candidate_raw_distance=candidate.device_distance,
+                circuit_match=False,
+            )
+            if is_manual_duplicate_candidate(
+                score,
+                sprint.started_at,
+                candidate.started_at,
+                sprint.performed_on,
+                candidate.performed_on,
+                sprint.sprint_index,
+                candidate.sprint_index,
+            ):
+                add_entry_issue(
+                    items,
+                    "Sprint",
+                    sprint.performed_on,
+                    sprint.started_at,
+                    f"Sprint {sprint.sprint_index or sprint.id} and sprint {candidate.sprint_index or candidate.id}",
+                    "Analysis blocker",
+                    "Possible duplicate entry",
+                    reason or "Similar sprint entries were found.",
+                    f"/entries#sprint-{sprint.id}",
+                    duplicate_actions("sprint", sprint, candidate),
+                )
+
+    dismissed_laps = dismissed_duplicate_pairs(conn, "lap")
+    for index, lap in enumerate(laps):
+        for candidate in laps[index + 1:]:
+            if duplicate_pair_key(lap.id, candidate.id) in dismissed_laps:
+                continue
+            if lap.circuit_id != candidate.circuit_id:
+                continue
+            score, reason = duplicate_score(
+                started_on=lap.started_at or lap.performed_on,
+                duration_seconds=minutes_to_seconds(lap.lap_time_minutes),
+                raw_distance=lap.device_distance,
+                candidate_date=candidate.performed_on,
+                candidate_started_at=candidate.started_at,
+                candidate_minutes=candidate.lap_time_minutes,
+                candidate_raw_distance=candidate.device_distance,
+                circuit_match=lap.circuit_id is not None,
+            )
+            if is_manual_duplicate_candidate(
+                score,
+                lap.started_at,
+                candidate.started_at,
+                lap.performed_on,
+                candidate.performed_on,
+                lap.lap_index,
+                candidate.lap_index,
+            ):
+                add_entry_issue(
+                    items,
+                    "Lap",
+                    lap.performed_on,
+                    lap.started_at,
+                    f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id} and lap {candidate.lap_index or candidate.id}",
+                    "Analysis blocker",
+                    "Possible duplicate entry",
+                    reason or "Similar lap entries were found.",
+                    f"/entries#lap-{lap.id}",
+                    duplicate_actions("lap", lap, candidate),
+                )
+
+
+def is_manual_duplicate_candidate(
+    score: float,
+    started_at: str | None,
+    candidate_started_at: str | None,
+    performed_on: str | None,
+    candidate_performed_on: str | None,
+    entry_index: int | None,
+    candidate_index: int | None,
+) -> bool:
+    if score < POSSIBLE_DUPLICATE_THRESHOLD:
+        same_date = date_part(performed_on) == date_part(candidate_performed_on)
+        same_index = entry_index is not None and entry_index == candidate_index
+        return same_date and same_index
+    delta = start_delta_minutes(started_at, candidate_started_at)
+    if delta is not None:
+        return delta <= 10 or score >= STRONG_DUPLICATE_THRESHOLD
+    same_date = date_part(performed_on) == date_part(candidate_performed_on)
+    same_index = entry_index == candidate_index
+    return same_date and same_index
+
+
+def minutes_to_seconds(minutes: float | None) -> int | None:
+    if minutes is None:
+        return None
+    return int(round(float(minutes) * 60))
+
+
 def maybe_add_issue(
     items: list[dict[str, object]],
     condition: bool,
@@ -970,6 +1283,7 @@ def add_entry_issue(
     issue: str,
     detail: str,
     action: str,
+    extra_actions: list[dict[str, object]] | None = None,
 ) -> None:
     items.append({
         "area": area,
@@ -980,6 +1294,7 @@ def add_entry_issue(
         "issue": issue,
         "detail": detail,
         "action": action,
+        "extra_actions": extra_actions or [],
     })
 
 
@@ -988,7 +1303,6 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
         return '<div class="empty">No maintenance issues found.</div>'
     rows = []
     for item in items:
-        action = escape(str(item["action"]))
         rows.append([
             escape(str(item["category"])),
             escape(str(item["date"])),
@@ -997,9 +1311,90 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
             escape(str(item["record"])),
             escape(str(item["issue"])),
             escape(str(item["detail"])),
-            f'<a href="{action}">Open</a>',
+            maintenance_actions(item),
         ])
     return html_table(["Category", "Date", "Start", "Area", "Record", "Issue", "Detail", ""], rows)
+
+
+def duplicate_actions(entry_type: str, first: object, second: object) -> list[dict[str, object]]:
+    return [
+        {"kind": "link", "href": f"/entries#{entry_type}-{second.id}", "label": "Open match"},
+        {
+            "kind": "not_duplicate",
+            "entry_type": entry_type,
+            "first_entry_id": first.id,
+            "second_entry_id": second.id,
+            "label": "Not duplicate",
+        },
+        {
+            "kind": "delete",
+            "entry_type": entry_type,
+            "entry_id": first.id,
+            "label": f"Delete {duplicate_entry_label(entry_type, first)}",
+        },
+        {
+            "kind": "delete",
+            "entry_type": entry_type,
+            "entry_id": second.id,
+            "label": f"Delete {duplicate_entry_label(entry_type, second)}",
+        },
+    ]
+
+
+def duplicate_entry_label(entry_type: str, entry: object) -> str:
+    if entry_type == "sprint":
+        index = getattr(entry, "sprint_index", None)
+    else:
+        index = getattr(entry, "lap_index", None)
+    number = index or getattr(entry, "id")
+    return f"{entry_type} {number} (id {getattr(entry, 'id')})"
+
+
+def maintenance_actions(item: dict[str, object]) -> str:
+    parts = [f'<a href="{escape(str(item["action"]))}">Open</a>']
+    for action in item.get("extra_actions", []):
+        if not isinstance(action, dict):
+            continue
+        if action.get("kind") == "link":
+            parts.append(f'<a href="{escape(str(action["href"]))}">{escape(str(action["label"]))}</a>')
+        elif action.get("kind") == "not_duplicate":
+            parts.append(
+                f'<form method="post" action="/maintenance/not-duplicate">'
+                f'<input type="hidden" name="entry_type" value="{escape(str(action["entry_type"]))}">'
+                f'<input type="hidden" name="first_id" value="{escape(str(action["first_entry_id"]))}">'
+                f'<input type="hidden" name="second_id" value="{escape(str(action["second_entry_id"]))}">'
+                f'<button class="secondary" type="submit">{escape(str(action["label"]))}</button>'
+                f"</form>"
+            )
+        elif action.get("kind") == "delete":
+            label = str(action["label"])
+            parts.append(
+                f'<form method="post" action="/entries/delete" '
+                f'onsubmit="return confirm(\'Delete this entry? This cannot be undone.\')">'
+                f'<input type="hidden" name="entry_type" value="{escape(str(action["entry_type"]))}">'
+                f'<input type="hidden" name="id" value="{escape(str(action["entry_id"]))}">'
+                f'<button class="secondary" type="submit">{escape(label)}</button>'
+                f"</form>"
+            )
+    return f'<div class="actions">{"".join(parts)}</div>'
+
+
+def dismissed_duplicate_pairs(conn: sqlite3.Connection, entry_type: str) -> set[tuple[int, int]]:
+    rows = conn.execute(
+        """
+        SELECT first_entry_id, second_entry_id
+        FROM duplicate_dismissals
+        WHERE entry_type = ?
+        """,
+        (entry_type,),
+    ).fetchall()
+    return {duplicate_pair_key(row["first_entry_id"], row["second_entry_id"]) for row in rows}
+
+
+def duplicate_pair_key(first_id: object, second_id: object) -> tuple[int, int]:
+    first = int(first_id)
+    second = int(second_id)
+    return (first, second) if first <= second else (second, first)
 
 
 def maintenance_category_rank(category: str) -> int:
@@ -1334,6 +1729,88 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
 </div>"""
 
 
+def circuit_progress_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Circuit", "Laps", "First", "Latest", "Best", "Average", "Latest gain", "Best date", "Latest date"],
+        [
+            [
+                row["circuit"],
+                row["laps"],
+                fmt_minutes(row["first_time"]),
+                fmt_minutes(row["latest_time"]),
+                fmt_minutes(row["best_time"]),
+                fmt_minutes(row["average_time"]),
+                signed_minutes(row["change_minutes"]),
+                row["best_date"],
+                row["latest_date"],
+            ]
+            for row in rows
+        ],
+    )
+
+
+def source_highlights_table(rows: list[dict[str, object]]) -> str:
+    highlights = []
+    for label, key, digits in [
+        ("Average estimated watts", "average_watts", 0),
+        ("Best 5 minute estimated watts", "best_300s_watts", 0),
+        ("Best 60 second estimated watts", "best_60s_watts", 0),
+        ("Average cadence", "average_cadence", 0),
+        ("Watts variability", "watts_variability_pct", 1),
+    ]:
+        row = best_source_row(rows, key)
+        if row is None:
+            continue
+        highlights.append([
+            label,
+            fmt_num(row.get(key), digits),
+            row.get("started_on", ""),
+            row.get("session_type", ""),
+            row.get("circuit", ""),
+            row.get("resistance", ""),
+        ])
+    return table(["Metric", "Value", "Start", "Type", "Circuit", "Resistance"], highlights)
+
+
+def strength_signals_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Date", "Start", "Type", "Session", "Resistance", "RPM", "Est watts", "HR", "Time", "Calories"],
+        [
+            [
+                row["date"],
+                row["start"],
+                row["type"],
+                row["label"],
+                row["resistance"],
+                fmt_num(row["rpm"], 0),
+                fmt_num(row["estimated_watts"], 1),
+                row["hr"],
+                fmt_minutes(row["minutes"]),
+                fmt_num(row["calories"], 1),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def calibration_coverage_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Resistance", "Status", "Scaling", "Sprint sessions", "Lap sessions", "Tests", "Last tested"],
+        [
+            [
+                row["resistance"],
+                "Calibrated" if row["scaling"] is not None else "Needs factor",
+                fmt_num(row["scaling"], 4),
+                row["sprint_sessions"],
+                row["lap_sessions"],
+                row["calibration_tests"],
+                row["last_tested"],
+            ]
+            for row in rows
+        ],
+    )
+
+
 def daily_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Date", "Sprints", "Laps", "Calories (HR/MET)", "Time", "Avg watts", "Avg RPM", "Lap distance", "Total distance"],
@@ -1503,32 +1980,97 @@ def metric(label: str, value: object, tone: str = "blue") -> str:
     return f'<div class="metric {tone}"><span>{escape(label)}</span><strong>{escape(str(value))}</strong></div>'
 
 
-def line_chart(title: str, points: list[tuple[str, float | None]], color: str) -> str:
+def chart_panel(title: str, points: list[tuple[str, float | None]], color: str, unit: str = "") -> str:
+    return f"""
+<div class="chart-panel">
+  {line_chart(title, points, color, unit=unit)}
+  <details>
+    <summary>Open larger chart</summary>
+    {line_chart(title, points, color, unit=unit, large=True)}
+  </details>
+</div>"""
+
+
+def line_chart(
+    title: str,
+    points: list[tuple[str, float | None]],
+    color: str,
+    *,
+    unit: str = "",
+    large: bool = False,
+) -> str:
+    display_title = f"{title} ({unit})" if unit else title
+    chart_class = "chart chart-large" if large else "chart"
     clean = [(label, float(value)) for label, value in points if value is not None]
     if not clean:
-        return f'<svg class="chart" role="img" aria-label="{escape(title)}"></svg>'
-    width, height, pad = 680, 220, 28
+        return f'<svg class="{chart_class}" role="img" aria-label="{escape(display_title)}"></svg>'
+    width, height = (1000, 667) if large else (680, 220)
+    left_pad, right_pad, top_pad, bottom_pad = 56, 18, 34, 30
     values = [value for _, value in clean]
     v_min, v_max = min(values), max(values)
     if v_min == v_max:
         v_min -= 1
         v_max += 1
-    x_step = (width - pad * 2) / max(1, len(clean) - 1)
+    x_step = (width - left_pad - right_pad) / max(1, len(clean) - 1)
+    plot_height = height - top_pad - bottom_pad
     coords = []
     for index, (_, value) in enumerate(clean):
-        x = pad + index * x_step
-        y = height - pad - ((value - v_min) / (v_max - v_min) * (height - pad * 2))
+        x = left_pad + index * x_step
+        y = height - bottom_pad - ((value - v_min) / (v_max - v_min) * plot_height)
         coords.append((x, y))
+    grid_lines = chart_grid_lines(v_min, v_max, unit, left_pad, width - right_pad, top_pad, height - bottom_pad)
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
     circles = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{color}"/>' for x, y in coords)
+    first_label = chart_edge_label(clean[0][0])
+    last_label = chart_edge_label(clean[-1][0])
     return f"""
-<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">
-  <text x="18" y="24" fill="#17202a" font-size="15" font-weight="700">{escape(title)}</text>
-  <line x1="{pad}" y1="{height-pad}" x2="{width-pad}" y2="{height-pad}" stroke="#d9e2ec"/>
-  <line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height-pad}" stroke="#d9e2ec"/>
+<svg class="{chart_class}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(display_title)}">
+  <text x="18" y="24" fill="#17202a" font-size="15" font-weight="700">{escape(display_title)}</text>
+  {grid_lines}
+  <line x1="{left_pad}" y1="{height-bottom_pad}" x2="{width-right_pad}" y2="{height-bottom_pad}" stroke="#d9e2ec"/>
+  <line x1="{left_pad}" y1="{top_pad}" x2="{left_pad}" y2="{height-bottom_pad}" stroke="#d9e2ec"/>
   <polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="3"/>
   {circles}
+  <text x="{left_pad}" y="{height - 8}" fill="#5f6b7a" font-size="11">{escape(first_label)}</text>
+  <text x="{width - right_pad}" y="{height - 8}" fill="#5f6b7a" font-size="11" text-anchor="end">{escape(last_label)}</text>
 </svg>"""
+
+
+def chart_grid_lines(
+    v_min: float,
+    v_max: float,
+    unit: str,
+    x1: int,
+    x2: int,
+    y_top: int,
+    y_bottom: int,
+    count: int = 4,
+) -> str:
+    lines = []
+    for index in range(count):
+        value = v_min + ((v_max - v_min) * index / max(1, count - 1))
+        y = y_bottom - ((value - v_min) / (v_max - v_min) * (y_bottom - y_top))
+        lines.append(
+            f'<line class="chart-grid-line" x1="{x1}" y1="{y:.1f}" x2="{x2}" y2="{y:.1f}" stroke="#e7eef5"/>'
+            f'<text class="chart-axis-value" x="8" y="{y + 4:.1f}" fill="#5f6b7a" font-size="11">'
+            f'{escape(chart_axis_label(value, unit))}</text>'
+        )
+    return "\n  ".join(lines)
+
+
+def chart_axis_label(value: float, unit: str = "") -> str:
+    digits = 0 if abs(value) >= 10 else 1
+    label = fmt_num(value, digits)
+    return f"{label} {unit}".strip()
+
+
+def chart_edge_label(label: object) -> str:
+    text = str(label)
+    if "T" in text:
+        return text.split("T", 1)[0]
+    if " " in text:
+        return text.split(" ", 1)[0]
+    return text[:16]
 
 
 def source_metric_points(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
@@ -1543,6 +2085,34 @@ def max_metric(rows: list[dict[str, object]], key: str) -> float | None:
         if value not in (None, ""):
             values.append(float(value))
     return max(values) if values else None
+
+
+def best_source_row(rows: list[dict[str, object]], key: str) -> dict[str, object] | None:
+    candidates = [row for row in rows if row.get(key) not in (None, "")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: float(row[key]))
+
+
+def max_sprint_watts(sprints: list[object]) -> float | None:
+    values = [float(sprint.estimated_watts) for sprint in sprints if sprint.estimated_watts is not None]
+    return max(values) if values else None
+
+
+def calibrated_resistance_count(rows: list[dict[str, object]]) -> int:
+    return sum(1 for row in rows if row.get("scaling") is not None)
+
+
+def best_circuit_gain(rows: list[dict[str, object]]) -> str:
+    gains = [float(row["change_minutes"]) for row in rows if row.get("change_minutes") is not None]
+    if not gains:
+        return ""
+    best = max(gains)
+    return signed_minutes(best)
+
+
+def average_value(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
 
 
 def row_value(row: sqlite3.Row, key: str, default: object = None) -> object:
@@ -2164,7 +2734,7 @@ def promotion_device_watts(params: dict[str, str], payload: dict[str, object]) -
 
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
-    started_at = normalize_datetime(empty_to_none(params.get("started_at")))
+    started_at = combine_entry_start(performed_on, params.get("started_at"))
     resistance = validated_resistance(params.get("resistance"))
     conn.execute(
         """
@@ -2209,7 +2779,7 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
         """,
         (
             required(params, "performed_on"),
-            normalize_datetime(empty_to_none(params.get("started_at"))),
+            combine_entry_start(required(params, "performed_on"), params.get("started_at")),
             maybe_int(params.get("sprint_index")),
             maybe_float(params.get("duration_minutes")),
             maybe_float(params.get("rpm")),
@@ -2225,7 +2795,7 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
 
 def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
-    started_at = normalize_datetime(empty_to_none(params.get("started_at")))
+    started_at = combine_entry_start(performed_on, params.get("started_at"))
     circuit_id = maybe_int(params.get("circuit_id"))
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
@@ -2243,7 +2813,7 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             started_at,
             maybe_int(params.get("lap_index")),
             circuit_id,
-            maybe_float(params.get("lap_time_minutes")),
+            lap_time_minutes_from_params(params),
             maybe_int(params.get("hr")),
             resistance,
             maybe_float(params.get("rpm")),
@@ -2273,15 +2843,86 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
         """,
         (
             required(params, "performed_on"),
-            normalize_datetime(empty_to_none(params.get("started_at"))),
+            combine_entry_start(required(params, "performed_on"), params.get("started_at")),
             maybe_int(params.get("lap_index")),
             circuit_id,
-            maybe_float(params.get("lap_time_minutes")),
+            lap_time_minutes_from_params(params),
             maybe_int(params.get("hr")),
             validated_resistance(params.get("resistance")),
             maybe_float(params.get("rpm")),
             entry_id,
         ),
+    )
+    conn.commit()
+
+
+def delete_entry(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    entry_type = required(params, "entry_type")
+    entry_id = maybe_int(required(params, "id"))
+    if entry_id is None:
+        raise ValueError("Entry id is required.")
+    table = {"sprint": "sprint_entries", "lap": "lap_entries"}.get(entry_type)
+    if table is None:
+        raise ValueError("Entry type must be sprint or lap.")
+    row = conn.execute(f"SELECT raw_activity_id FROM {table} WHERE id = ?", (entry_id,)).fetchone()
+    if row is None:
+        raise ValueError("Entry was not found.")
+    raw_activity_id = row["raw_activity_id"]
+    conn.execute(f"DELETE FROM {table} WHERE id = ?", (entry_id,))
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET duplicate_entry_type = NULL,
+            duplicate_entry_id = NULL,
+            duplicate_confidence = NULL,
+            duplicate_reason = NULL,
+            review_status = CASE
+                WHEN review_status = 'already_logged' AND hr IS NULL THEN 'needs_hr'
+                WHEN review_status = 'already_logged' THEN 'needs_review'
+                ELSE review_status
+            END
+        WHERE duplicate_entry_type = ? AND duplicate_entry_id = ?
+        """,
+        (entry_type, entry_id),
+    )
+    if raw_activity_id is not None:
+        conn.execute(
+            """
+            UPDATE raw_activities
+            SET review_status = CASE WHEN hr IS NULL THEN 'needs_hr' ELSE 'needs_review' END
+            WHERE id = ? AND review_status = 'imported'
+            """,
+            (raw_activity_id,),
+        )
+    conn.commit()
+
+
+def dismiss_duplicate_pair(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    entry_type = required(params, "entry_type")
+    table = {"sprint": "sprint_entries", "lap": "lap_entries"}.get(entry_type)
+    if table is None:
+        raise ValueError("Entry type must be sprint or lap.")
+    first_id = maybe_int(required(params, "first_id"))
+    second_id = maybe_int(required(params, "second_id"))
+    if first_id is None or second_id is None:
+        raise ValueError("Both entry ids are required.")
+    if first_id == second_id:
+        raise ValueError("Duplicate pair must contain two different entries.")
+    first_id, second_id = duplicate_pair_key(first_id, second_id)
+    matching_rows = conn.execute(
+        f"SELECT COUNT(*) AS total FROM {table} WHERE id IN (?, ?)",
+        (first_id, second_id),
+    ).fetchone()["total"]
+    if matching_rows != 2:
+        raise ValueError("Both entries must exist before a duplicate can be dismissed.")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO duplicate_dismissals (
+            entry_type, first_entry_id, second_entry_id
+        )
+        VALUES (?, ?, ?)
+        """,
+        (entry_type, first_id, second_id),
     )
     conn.commit()
 
@@ -2561,6 +3202,13 @@ def signed_num(value: object, digits: int = 1) -> str:
     return f"{num:+,.{digits}f}"
 
 
+def signed_minutes(value: object) -> str:
+    if value is None:
+        return ""
+    prefix = "+" if float(value) >= 0 else "-"
+    return f"{prefix}{fmt_minutes(abs(float(value)))}"
+
+
 def signed_percent(value: object) -> str:
     if value is None:
         return ""
@@ -2594,14 +3242,27 @@ def fmt_start_time(value: object) -> str:
     return text
 
 
-def datetime_local_value(value: object) -> str:
+def time_input_value(value: object) -> str:
     if value in (None, ""):
         return ""
     text = str(value)
     parsed = parse_datetime(text)
     if parsed is not None and has_time_component(text):
-        return parsed.strftime("%Y-%m-%dT%H:%M")
-    return normalize_datetime(text) or ""
+        return parsed.strftime("%H:%M")
+    if ":" in text:
+        return text[:5]
+    return ""
+
+
+def combine_entry_start(performed_on: str, value: FormValue | None) -> str | None:
+    start = empty_to_none(value)
+    if start is None:
+        return None
+    if has_time_component(start):
+        return normalize_datetime(start)
+    if ":" in start:
+        return f"{performed_on}T{start[:5]}"
+    return normalize_datetime(start)
 
 
 def entry_resistance_value(value: object) -> int:
@@ -2671,6 +3332,60 @@ def date_part(value: str | None) -> str | None:
     if len(cleaned) < 10:
         return None
     return cleaned[:10]
+
+
+def lap_time_minutes_from_params(params: dict[str, FormValue]) -> float | None:
+    existing = empty_to_none(params.get("lap_time_minutes"))
+    if existing is not None:
+        return duration_text_to_minutes(existing)
+    minutes = maybe_int(params.get("lap_time_min"))
+    seconds = maybe_int(params.get("lap_time_sec"))
+    if minutes is None and seconds is None:
+        return None
+    minutes = minutes or 0
+    seconds = seconds or 0
+    if seconds < 0 or seconds > 59:
+        raise ValueError("Lap seconds must be between 0 and 59.")
+    return minutes + (seconds / 60)
+
+
+def duration_text_to_minutes(value: str) -> float:
+    cleaned = value.strip()
+    if ":" not in cleaned:
+        minutes = float(cleaned)
+        if minutes < 0:
+            raise ValueError("Lap time cannot be negative.")
+        return minutes
+    parts = cleaned.split(":")
+    if len(parts) not in (2, 3) or any(part.strip() == "" for part in parts):
+        raise ValueError("Lap time must use minutes:seconds or hours:minutes:seconds.")
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("Lap time must use whole minutes and seconds.") from exc
+    if any(number < 0 for number in numbers):
+        raise ValueError("Lap time cannot be negative.")
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        hours = 0
+    else:
+        hours, minutes, seconds = numbers
+        if minutes > 59:
+            raise ValueError("Lap minutes must be between 0 and 59 when hours are supplied.")
+    if seconds > 59:
+        raise ValueError("Lap seconds must be between 0 and 59.")
+    return (hours * 60) + minutes + (seconds / 60)
+
+
+def duration_entry_value(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    total_seconds = int(round(float(value) * 60))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def maybe_float(value: str | None) -> float | None:

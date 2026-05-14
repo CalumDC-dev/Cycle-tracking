@@ -115,6 +115,15 @@ CREATE TABLE IF NOT EXISTS lap_entries (
     notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS duplicate_dismissals (
+    id INTEGER PRIMARY KEY,
+    entry_type TEXT NOT NULL,
+    first_entry_id INTEGER NOT NULL,
+    second_entry_id INTEGER NOT NULL,
+    dismissed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(entry_type, first_entry_id, second_entry_id)
+);
+
 CREATE TABLE IF NOT EXISTS import_log (
     id INTEGER PRIMARY KEY,
     source_file TEXT NOT NULL,
@@ -148,6 +157,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 def reset_db(conn: sqlite3.Connection) -> None:
     tables = [
         "import_log",
+        "duplicate_dismissals",
         "lap_entries",
         "sprint_entries",
         "raw_activities",
