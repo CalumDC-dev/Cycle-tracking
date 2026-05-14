@@ -783,6 +783,7 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     profile = editable_calibration_profile(conn)
     resistance_rows = resistance_scaling_rows(conn)
     mass_rows = conn.execute("SELECT id, measured_on, mass_kg FROM mass_log ORDER BY measured_on DESC").fetchall()
+    current_mass_kg = latest_mass_kg(conn)
     fit_sources = fit_calibration_source_rows(conn)
     tests = conn.execute(
         """
@@ -823,7 +824,7 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     <label>Device watts<input name="device_watts" type="number" step="0.001" min="0" required></label>
     <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
     <label>Average HR<input name="hr" type="number" min="0"></label>
-    <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0"></label>
+    <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(current_mass_kg)}"></label>
     <label>Notes<input name="notes"></label>
     <button type="submit">Preview factor</button>
   </form>
@@ -832,7 +833,7 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
 <section class="band">
   <h2>FIT-Assisted Calibration Test</h2>
   {calibration_protocol_panel()}
-  {fit_calibration_upload_form()}
+  {fit_calibration_upload_form(current_mass_kg)}
   {fit_calibration_sources_table(fit_sources)}
 </section>
 <section class="band">
@@ -1855,14 +1856,14 @@ def calibration_protocol_panel() -> str:
 </div>"""
 
 
-def fit_calibration_upload_form() -> str:
+def fit_calibration_upload_form(current_mass_kg: float | None) -> str:
     return f"""
 <form class="stack" method="post" action="/calibration/test/preview" enctype="multipart/form-data" style="margin-bottom:14px;">
   <label>Source<input name="source" value="strava" required></label>
   <label>Calibration FIT<input name="calibration_upload" type="file" accept=".fit,.fit.gz" required></label>
   <label>Resistance<select name="resistance" required>{resistance_select_options(4)}</select></label>
   <label>Average HR<input name="hr" type="number" min="0"></label>
-  <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0"></label>
+  <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(current_mass_kg)}"></label>
   <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
   <label>Notes<input name="notes"></label>
   <button type="submit">Preview calibration file</button>
@@ -3414,6 +3415,18 @@ def add_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
         (required(params, "measured_on"), float(required(params, "mass_kg"))),
     )
     conn.commit()
+
+
+def latest_mass_kg(conn: sqlite3.Connection) -> float | None:
+    row = conn.execute(
+        """
+        SELECT mass_kg
+        FROM mass_log
+        ORDER BY measured_on DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return float(row["mass_kg"]) if row else None
 
 
 def update_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:

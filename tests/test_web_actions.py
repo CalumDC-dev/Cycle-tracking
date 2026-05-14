@@ -753,6 +753,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="calibration_upload"', html)
         self.assertIn("Preview calibration file", html)
         self.assertIn('enctype="multipart/form-data"', html)
+        self.assertIn('name="mass_kg" type="number" step="0.001" min="0" value="80"', html)
 
     def test_add_and_update_mass_log(self):
         add_mass_log(self.conn, {"measured_on": "2026-05-04", "mass_kg": "79.5"})
