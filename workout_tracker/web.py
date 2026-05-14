@@ -364,6 +364,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/confirm-duplicate":
                 confirm_duplicate_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/maintenance/not-duplicate":
+                dismiss_duplicate_pair(conn, params)
+                self._redirect("/maintenance")
             elif parsed.path == "/review/promote":
                 promote_raw_activity(conn, params)
                 self._redirect("/review")
@@ -1108,7 +1111,7 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
         if lap.hr is not None and lap.lap_time_minutes is not None and lap.calories_mets is None:
             add_entry_issue(items, "Lap", lap.performed_on, lap.started_at, context, "Analysis blocker", "Missing calorie lookup", "Check mass log and MET lookup coverage for this HR/date.", f"/calibration")
 
-    add_manual_duplicate_issues(items, sprints, laps)
+    add_manual_duplicate_issues(conn, items, sprints, laps)
 
     review_rows = conn.execute(
         """
@@ -1144,9 +1147,17 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
     )
 
 
-def add_manual_duplicate_issues(items: list[dict[str, object]], sprints: list[object], laps: list[object]) -> None:
+def add_manual_duplicate_issues(
+    conn: sqlite3.Connection,
+    items: list[dict[str, object]],
+    sprints: list[object],
+    laps: list[object],
+) -> None:
+    dismissed_sprints = dismissed_duplicate_pairs(conn, "sprint")
     for index, sprint in enumerate(sprints):
         for candidate in sprints[index + 1:]:
+            if duplicate_pair_key(sprint.id, candidate.id) in dismissed_sprints:
+                continue
             score, reason = duplicate_score(
                 started_on=sprint.started_at or sprint.performed_on,
                 duration_seconds=minutes_to_seconds(sprint.duration_minutes),
@@ -1179,8 +1190,11 @@ def add_manual_duplicate_issues(items: list[dict[str, object]], sprints: list[ob
                     duplicate_actions("sprint", sprint, candidate),
                 )
 
+    dismissed_laps = dismissed_duplicate_pairs(conn, "lap")
     for index, lap in enumerate(laps):
         for candidate in laps[index + 1:]:
+            if duplicate_pair_key(lap.id, candidate.id) in dismissed_laps:
+                continue
             if lap.circuit_id != candidate.circuit_id:
                 continue
             score, reason = duplicate_score(
@@ -1306,6 +1320,13 @@ def duplicate_actions(entry_type: str, first: object, second: object) -> list[di
     return [
         {"kind": "link", "href": f"/entries#{entry_type}-{second.id}", "label": "Open match"},
         {
+            "kind": "not_duplicate",
+            "entry_type": entry_type,
+            "first_entry_id": first.id,
+            "second_entry_id": second.id,
+            "label": "Not duplicate",
+        },
+        {
             "kind": "delete",
             "entry_type": entry_type,
             "entry_id": first.id,
@@ -1336,6 +1357,15 @@ def maintenance_actions(item: dict[str, object]) -> str:
             continue
         if action.get("kind") == "link":
             parts.append(f'<a href="{escape(str(action["href"]))}">{escape(str(action["label"]))}</a>')
+        elif action.get("kind") == "not_duplicate":
+            parts.append(
+                f'<form method="post" action="/maintenance/not-duplicate">'
+                f'<input type="hidden" name="entry_type" value="{escape(str(action["entry_type"]))}">'
+                f'<input type="hidden" name="first_id" value="{escape(str(action["first_entry_id"]))}">'
+                f'<input type="hidden" name="second_id" value="{escape(str(action["second_entry_id"]))}">'
+                f'<button class="secondary" type="submit">{escape(str(action["label"]))}</button>'
+                f"</form>"
+            )
         elif action.get("kind") == "delete":
             label = str(action["label"])
             parts.append(
@@ -1347,6 +1377,24 @@ def maintenance_actions(item: dict[str, object]) -> str:
                 f"</form>"
             )
     return f'<div class="actions">{"".join(parts)}</div>'
+
+
+def dismissed_duplicate_pairs(conn: sqlite3.Connection, entry_type: str) -> set[tuple[int, int]]:
+    rows = conn.execute(
+        """
+        SELECT first_entry_id, second_entry_id
+        FROM duplicate_dismissals
+        WHERE entry_type = ?
+        """,
+        (entry_type,),
+    ).fetchall()
+    return {duplicate_pair_key(row["first_entry_id"], row["second_entry_id"]) for row in rows}
+
+
+def duplicate_pair_key(first_id: object, second_id: object) -> tuple[int, int]:
+    first = int(first_id)
+    second = int(second_id)
+    return (first, second) if first <= second else (second, first)
 
 
 def maintenance_category_rank(category: str) -> int:
@@ -2846,6 +2894,36 @@ def delete_entry(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None
             """,
             (raw_activity_id,),
         )
+    conn.commit()
+
+
+def dismiss_duplicate_pair(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    entry_type = required(params, "entry_type")
+    table = {"sprint": "sprint_entries", "lap": "lap_entries"}.get(entry_type)
+    if table is None:
+        raise ValueError("Entry type must be sprint or lap.")
+    first_id = maybe_int(required(params, "first_id"))
+    second_id = maybe_int(required(params, "second_id"))
+    if first_id is None or second_id is None:
+        raise ValueError("Both entry ids are required.")
+    if first_id == second_id:
+        raise ValueError("Duplicate pair must contain two different entries.")
+    first_id, second_id = duplicate_pair_key(first_id, second_id)
+    matching_rows = conn.execute(
+        f"SELECT COUNT(*) AS total FROM {table} WHERE id IN (?, ?)",
+        (first_id, second_id),
+    ).fetchone()["total"]
+    if matching_rows != 2:
+        raise ValueError("Both entries must exist before a duplicate can be dismissed.")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO duplicate_dismissals (
+            entry_type, first_entry_id, second_entry_id
+        )
+        VALUES (?, ?, ?)
+        """,
+        (entry_type, first_id, second_id),
+    )
     conn.commit()
 
 

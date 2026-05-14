@@ -18,6 +18,7 @@ from workout_tracker.web import (
     add_circuit,
     confirm_duplicate_activity,
     delete_entry,
+    dismiss_duplicate_pair,
     find_activity_duplicate,
     grouped_table,
     import_activity_file_to_review,
@@ -276,8 +277,48 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("start time within 2 minutes", duplicate_items[0]["detail"])
         html = render_maintenance(self.conn)
         self.assertIn('/entries/delete', html)
+        self.assertIn('/maintenance/not-duplicate', html)
         self.assertIn('name="entry_type" value="sprint"', html)
         self.assertIn("Delete sprint 1", html)
+        self.assertIn("Not duplicate", html)
+
+    def test_maintenance_can_dismiss_false_positive_manual_duplicate(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "07:30",
+                "sprint_index": "1",
+                "duration_minutes": "15",
+                "device_distance": "5",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "started_at": "08:00",
+                "sprint_index": "2",
+                "duration_minutes": "15",
+                "device_distance": "5",
+            },
+        )
+        ids = [
+            row["id"]
+            for row in self.conn.execute("SELECT id FROM sprint_entries ORDER BY id").fetchall()
+        ]
+        self.assertIn("Possible duplicate entry", [item["issue"] for item in maintenance_items(self.conn)])
+
+        dismiss_duplicate_pair(
+            self.conn,
+            {"entry_type": "sprint", "first_id": str(ids[1]), "second_id": str(ids[0])},
+        )
+
+        self.assertNotIn("Possible duplicate entry", [item["issue"] for item in maintenance_items(self.conn)])
+        dismissal = self.conn.execute(
+            "SELECT entry_type, first_entry_id, second_entry_id FROM duplicate_dismissals"
+        ).fetchone()
+        self.assertEqual(dict(dismissal), {"entry_type": "sprint", "first_entry_id": ids[0], "second_entry_id": ids[1]})
 
     def test_delete_entry_removes_manual_duplicate(self):
         add_sprint_entry(
