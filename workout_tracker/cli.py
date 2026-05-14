@@ -25,7 +25,7 @@ def main() -> None:
     import_parser.add_argument("--reset", action="store_true", help="Drop existing app tables first")
 
     activity_parser = subparsers.add_parser("import-activities", help="Import raw activity files into review")
-    activity_parser.add_argument("activity_file", help="Path to a CSV, JSON, TCX, TCX.GZ, ZIP, or directory of exports")
+    activity_parser.add_argument("activity_file", help="Path to a CSV, JSON, TCX, FIT, ZIP, or directory of exports")
     activity_parser.add_argument("--source", default="strava", help="Source label for imported rows")
 
     serve_parser = subparsers.add_parser("serve", help="Run the local web UI")

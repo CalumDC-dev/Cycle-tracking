@@ -1429,7 +1429,7 @@ def render_review(conn: sqlite3.Connection) -> str:
   <h2>Import Activity File</h2>
   <form class="stack" method="post" action="/review/import-file" enctype="multipart/form-data">
     <label>Source<input name="source" value="strava" required></label>
-    <label>Activity file<input name="activity_upload" type="file" accept=".csv,.json,.tcx,.gz,.zip"></label>
+    <label>Activity file<input name="activity_upload" type="file" accept=".csv,.json,.tcx,.fit,.gz,.zip"></label>
     <label>Folder or path<input name="activity_file" placeholder="exports/activities"></label>
     <button type="submit">Import file</button>
   </form>

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import gzip
 import io
 import json
 from pathlib import Path
+import struct
 from typing import Any
 import xml.etree.ElementTree as ET
 import zipfile
@@ -15,7 +16,98 @@ import zipfile
 from .activity_metrics import ActivitySample, analyse_activity_samples, parse_activity_time
 
 
-SUPPORTED_SUFFIXES = {".csv", ".json", ".tcx", ".tcx.gz", ".zip"}
+SUPPORTED_SUFFIXES = {".csv", ".json", ".tcx", ".tcx.gz", ".fit", ".fit.gz", ".zip"}
+
+FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
+FIT_BASE_TYPES = {
+    0x00: ("enum", 1, "B", 0xFF),
+    0x01: ("sint8", 1, "b", 0x7F),
+    0x02: ("uint8", 1, "B", 0xFF),
+    0x83: ("sint16", 2, "h", 0x7FFF),
+    0x84: ("uint16", 2, "H", 0xFFFF),
+    0x85: ("sint32", 4, "i", 0x7FFFFFFF),
+    0x86: ("uint32", 4, "I", 0xFFFFFFFF),
+    0x07: ("string", 1, None, 0),
+    0x88: ("float32", 4, "f", None),
+    0x89: ("float64", 8, "d", None),
+    0x0A: ("uint8z", 1, "B", 0),
+    0x8B: ("uint16z", 2, "H", 0),
+    0x8C: ("uint32z", 4, "I", 0),
+    0x0D: ("byte", 1, "B", None),
+    0x8E: ("sint64", 8, "q", 0x7FFFFFFFFFFFFFFF),
+    0x8F: ("uint64", 8, "Q", 0xFFFFFFFFFFFFFFFF),
+    0x90: ("uint64z", 8, "Q", 0),
+}
+FIT_FIELD_NAMES = {
+    0: {0: "type", 1: "manufacturer", 2: "product", 3: "serial_number", 4: "time_created"},
+    18: {
+        253: "timestamp",
+        2: "start_time",
+        5: "sport",
+        6: "sub_sport",
+        7: "total_elapsed_time",
+        8: "total_timer_time",
+        9: "total_distance",
+        11: "total_calories",
+        14: "avg_speed",
+        15: "max_speed",
+        16: "avg_heart_rate",
+        17: "max_heart_rate",
+        18: "avg_cadence",
+        19: "max_cadence",
+        20: "avg_power",
+        21: "max_power",
+        26: "num_laps",
+        34: "normalized_power",
+        124: "enhanced_avg_speed",
+        125: "enhanced_max_speed",
+    },
+    19: {
+        253: "timestamp",
+        2: "start_time",
+        7: "total_elapsed_time",
+        8: "total_timer_time",
+        9: "total_distance",
+        11: "total_calories",
+        14: "avg_speed",
+        15: "max_speed",
+        16: "avg_heart_rate",
+        17: "max_heart_rate",
+        18: "avg_cadence",
+        19: "max_cadence",
+        20: "avg_power",
+        21: "max_power",
+        33: "normalized_power",
+        110: "enhanced_avg_speed",
+        111: "enhanced_max_speed",
+    },
+    20: {
+        253: "timestamp",
+        3: "heart_rate",
+        4: "cadence",
+        5: "distance",
+        6: "speed",
+        7: "power",
+        13: "temperature",
+        73: "enhanced_speed",
+    },
+    34: {253: "timestamp", 0: "total_timer_time", 1: "num_sessions", 2: "type", 5: "local_timestamp"},
+}
+FIT_SCALES = {
+    "avg_speed": 1000,
+    "max_speed": 1000,
+    "speed": 1000,
+    "enhanced_speed": 1000,
+    "enhanced_avg_speed": 1000,
+    "enhanced_max_speed": 1000,
+    "total_distance": 100,
+    "distance": 100,
+    "total_elapsed_time": 1000,
+    "total_timer_time": 1000,
+}
+FIT_TIME_FIELDS = {"timestamp", "start_time", "time_created", "local_timestamp"}
+FIT_SPORTS = {2: "cycling"}
+FIT_SUB_SPORTS = {6: "indoor_cycling"}
 
 
 FIELD_ALIASES = {
@@ -100,10 +192,12 @@ def load_activity_file(path: str | Path, source: str = "strava") -> list[dict[st
         rows = _load_json(file_path)
     elif _is_tcx_path(file_path):
         rows = _load_tcx(file_path, source)
+    elif _is_fit_path(file_path):
+        rows = _load_fit(file_path, source)
     elif file_path.suffix.lower() == ".zip":
         rows = _load_zip(file_path, source)
     else:
-        raise ValueError("Activity imports support .csv, .json, .tcx, .tcx.gz, and .zip files.")
+        raise ValueError("Activity imports support .csv, .json, .tcx, .tcx.gz, .fit, .fit.gz, and .zip files.")
     return [row for row in (_normalize_row(row, source) for row in rows) if row is not None]
 
 
@@ -221,6 +315,214 @@ def _trackpoint_samples(activity: ET.Element) -> list[ActivitySample]:
     return samples
 
 
+def _load_fit(path: Path, source: str) -> list[dict[str, Any]]:
+    return _load_fit_bytes(path.read_bytes(), path.name, source)
+
+
+def _load_fit_bytes(data: bytes, name: str, source: str) -> list[dict[str, Any]]:
+    if name.lower().endswith(".gz"):
+        data = gzip.decompress(data)
+    messages = _parse_fit_messages(data)
+    file_id = _first_fit_message(messages, 0)
+    session = _first_fit_message(messages, 18)
+    if not session:
+        return []
+    records = messages.get(20, [])
+    laps = messages.get(19, [])
+    duration = _fit_number(session.get("total_timer_time") or session.get("total_elapsed_time"))
+    distance_m = _fit_number(session.get("total_distance"))
+    samples = _fit_record_samples(records)
+    analysis = analyse_activity_samples(samples, duration_seconds=duration)
+    title = _display_stem(name).replace("_", " ")
+    started_on = session.get("start_time") or _first_record_time(records) or file_id.get("time_created")
+    payload = {
+        "format": "fit",
+        "sport": FIT_SPORTS.get(session.get("sport"), session.get("sport")),
+        "sub_sport": FIT_SUB_SPORTS.get(session.get("sub_sport"), session.get("sub_sport")),
+        "record_count": len(records),
+        "lap_count": len(laps),
+        "laps": [_fit_lap_payload(lap) for lap in laps],
+        "calories": session.get("total_calories"),
+        "session_average_watts": session.get("avg_power"),
+        "session_max_watts": session.get("max_power"),
+        "session_average_cadence": session.get("avg_cadence"),
+        "session_max_cadence": session.get("max_cadence"),
+        "session_average_speed_mps": session.get("enhanced_avg_speed") or session.get("avg_speed"),
+        "session_max_speed_mps": session.get("enhanced_max_speed") or session.get("max_speed"),
+        "session_average_hr": session.get("avg_heart_rate"),
+        "session_max_hr": session.get("max_heart_rate"),
+        "session_normalized_power": session.get("normalized_power"),
+        **analysis,
+    }
+    if payload.get("average_watts") is None and session.get("avg_power") is not None:
+        payload["average_watts"] = session["avg_power"]
+    if payload.get("max_watts") is None and session.get("max_power") is not None:
+        payload["max_watts"] = session["max_power"]
+    if payload.get("average_cadence") is None and session.get("avg_cadence") is not None:
+        payload["average_cadence"] = session["avg_cadence"]
+    if payload.get("max_cadence") is None and session.get("max_cadence") is not None:
+        payload["max_cadence"] = session["max_cadence"]
+    if payload.get("average_speed_mps") is None:
+        payload["average_speed_mps"] = session.get("enhanced_avg_speed") or session.get("avg_speed")
+    if payload.get("max_speed_mps") is None:
+        payload["max_speed_mps"] = session.get("enhanced_max_speed") or session.get("max_speed")
+    if payload.get("average_source_hr") is None and session.get("avg_heart_rate") is not None:
+        payload["average_source_hr"] = session["avg_heart_rate"]
+    if payload.get("max_source_hr") is None and session.get("max_heart_rate") is not None:
+        payload["max_source_hr"] = session["max_heart_rate"]
+    return [
+        {
+            "source": source,
+            "source_activity_id": _fit_source_activity_id(file_id, started_on, title),
+            "title": title,
+            "started_on": started_on,
+            "duration_seconds": duration,
+            "raw_distance": distance_m / 1000 if distance_m is not None else None,
+            "hr": payload.get("average_source_hr"),
+            "raw_payload": json.dumps(_compact_payload(payload), sort_keys=True),
+        }
+    ]
+
+
+def _parse_fit_messages(data: bytes) -> dict[int, list[dict[str, Any]]]:
+    if len(data) < 12:
+        raise ValueError("FIT file is too small.")
+    header_size = data[0]
+    if len(data) < header_size + 2:
+        raise ValueError("FIT file header is incomplete.")
+    data_size = struct.unpack_from("<I", data, 4)[0]
+    if data[8:12] != b".FIT":
+        raise ValueError("FIT file header is missing the .FIT signature.")
+    pos = header_size
+    end = header_size + data_size
+    definitions: dict[int, tuple[int, str, list[tuple[int, int, int]], list[tuple[int, int, int]]]] = {}
+    messages: dict[int, list[dict[str, Any]]] = {}
+    last_timestamp: int | None = None
+    while pos < end:
+        header = data[pos]
+        pos += 1
+        compressed_offset: int | None = None
+        if header & 0x80:
+            local_num = (header >> 5) & 0x03
+            is_definition = False
+            has_developer_fields = False
+            compressed_offset = header & 0x1F
+        else:
+            local_num = header & 0x0F
+            is_definition = bool(header & 0x40)
+            has_developer_fields = bool(header & 0x20)
+        if is_definition:
+            arch = data[pos + 1]
+            pos += 2
+            endian = ">" if arch else "<"
+            global_num = struct.unpack_from(f"{endian}H", data, pos)[0]
+            pos += 2
+            field_count = data[pos]
+            pos += 1
+            fields = []
+            for _ in range(field_count):
+                fields.append((data[pos], data[pos + 1], data[pos + 2]))
+                pos += 3
+            developer_fields = []
+            if has_developer_fields:
+                developer_count = data[pos]
+                pos += 1
+                for _ in range(developer_count):
+                    developer_fields.append((data[pos], data[pos + 1], data[pos + 2]))
+                    pos += 3
+            definitions[local_num] = (global_num, endian, fields, developer_fields)
+            continue
+        if local_num not in definitions:
+            raise ValueError("FIT data message referenced an unknown local definition.")
+        global_num, endian, fields, developer_fields = definitions[local_num]
+        values = {}
+        for field_num, size, base_type in fields:
+            values[field_num] = _fit_decode_value(data[pos : pos + size], base_type, endian)
+            pos += size
+        for _, size, _ in developer_fields:
+            pos += size
+        named = _fit_named_fields(global_num, values)
+        if compressed_offset is not None:
+            timestamp = _fit_compressed_timestamp(last_timestamp, compressed_offset)
+            if timestamp is not None and "timestamp" not in named:
+                named["timestamp"] = _fit_datetime_text(timestamp)
+        raw_timestamp = values.get(253)
+        if isinstance(raw_timestamp, int):
+            last_timestamp = raw_timestamp
+        elif compressed_offset is not None:
+            last_timestamp = _fit_compressed_timestamp(last_timestamp, compressed_offset)
+        messages.setdefault(global_num, []).append(named)
+    return messages
+
+
+def _fit_decode_value(raw: bytes, base_type: int, endian: str) -> object:
+    info = FIT_BASE_TYPES.get(base_type)
+    if info is None:
+        return raw.hex()
+    name, unit_size, fmt, invalid = info
+    if name == "string":
+        return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+    if fmt is None:
+        return raw.hex()
+    count = max(1, len(raw) // unit_size)
+    values = []
+    for index in range(count):
+        chunk = raw[index * unit_size : (index + 1) * unit_size]
+        value = struct.unpack(f"{endian}{fmt}", chunk)[0]
+        values.append(None if invalid is not None and value == invalid else value)
+    return values[0] if len(values) == 1 else values
+
+
+def _fit_named_fields(global_num: int, values: dict[int, object]) -> dict[str, Any]:
+    fields = {}
+    names = FIT_FIELD_NAMES.get(global_num, {})
+    for field_num, value in values.items():
+        name = names.get(field_num, f"field_{field_num}")
+        if name in FIT_TIME_FIELDS and isinstance(value, int):
+            value = _fit_datetime_text(value)
+        elif name in FIT_SCALES and value is not None:
+            value = _fit_scaled(value, FIT_SCALES[name])
+        fields[name] = value
+    return fields
+
+
+def _fit_record_samples(records: list[dict[str, Any]]) -> list[ActivitySample]:
+    parsed_times = [parse_activity_time(str(record["timestamp"])) if record.get("timestamp") else None for record in records]
+    base_time = next((parsed for parsed in parsed_times if parsed is not None), None)
+    samples = []
+    for index, record in enumerate(records):
+        parsed_time = parsed_times[index]
+        elapsed = (parsed_time - base_time).total_seconds() if parsed_time and base_time else float(index)
+        samples.append(
+            ActivitySample(
+                elapsed_seconds=elapsed,
+                watts=_fit_number(record.get("power")),
+                cadence=_fit_number(record.get("cadence")),
+                speed_mps=_fit_number(record.get("enhanced_speed") or record.get("speed")),
+                hr=_fit_number(record.get("heart_rate")),
+            )
+        )
+    return samples
+
+
+def _fit_lap_payload(lap: dict[str, Any]) -> dict[str, Any]:
+    return _compact_payload(
+        {
+            "start_time": lap.get("start_time"),
+            "duration_seconds": lap.get("total_timer_time") or lap.get("total_elapsed_time"),
+            "distance_m": lap.get("total_distance"),
+            "average_watts": lap.get("avg_power"),
+            "max_watts": lap.get("max_power"),
+            "average_cadence": lap.get("avg_cadence"),
+            "max_cadence": lap.get("max_cadence"),
+            "average_hr": lap.get("avg_heart_rate"),
+            "max_hr": lap.get("max_heart_rate"),
+            "average_speed_mps": lap.get("enhanced_avg_speed") or lap.get("avg_speed"),
+            "max_speed_mps": lap.get("enhanced_max_speed") or lap.get("max_speed"),
+        }
+    )
+
+
 def _load_zip(path: Path, source: str) -> list[dict[str, Any]]:
     with zipfile.ZipFile(path) as archive:
         names = {info.filename for info in archive.infolist() if not info.is_dir()}
@@ -230,6 +532,8 @@ def _load_zip(path: Path, source: str) -> list[dict[str, Any]]:
         for info in sorted((info for info in archive.infolist() if not info.is_dir()), key=lambda item: item.filename):
             if _is_tcx_name(info.filename):
                 rows.extend(_load_tcx_bytes(archive.read(info.filename), info.filename, source))
+            elif _is_fit_name(info.filename):
+                rows.extend(_load_fit_bytes(archive.read(info.filename), info.filename, source))
             elif info.filename.lower().endswith(".json"):
                 rows.extend(_load_json_payload(json.loads(archive.read(info.filename).decode("utf-8"))))
             elif info.filename.lower().endswith(".csv"):
@@ -246,6 +550,8 @@ def _load_strava_archive_zip(archive: zipfile.ZipFile, source: str) -> list[dict
         activity_rows = []
         if filename in names and _is_tcx_name(filename):
             activity_rows = _load_tcx_bytes(archive.read(filename), filename, source)
+        elif filename in names and _is_fit_name(filename):
+            activity_rows = _load_fit_bytes(archive.read(filename), filename, source)
         rows.extend(_merge_archive_rows(metadata, activity_rows, filename, source))
     return rows
 
@@ -260,6 +566,8 @@ def _load_strava_archive_directory(path: Path, source: str) -> list[dict[str, An
             activity_path = path / filename
             if activity_path.exists() and _is_tcx_path(activity_path):
                 activity_rows = _load_tcx(activity_path, source)
+            elif activity_path.exists() and _is_fit_path(activity_path):
+                activity_rows = _load_fit(activity_path, source)
         rows.extend(_merge_archive_rows(metadata, activity_rows, filename, source))
     return rows
 
@@ -400,6 +708,60 @@ def _number_or_none(value: str | None) -> float | None:
     return float(text) if text is not None else None
 
 
+def _first_fit_message(messages: dict[int, list[dict[str, Any]]], global_num: int) -> dict[str, Any]:
+    rows = messages.get(global_num, [])
+    return rows[0] if rows else {}
+
+
+def _fit_source_activity_id(file_id: dict[str, Any], started_on: object, title: str) -> str:
+    serial = file_id.get("serial_number")
+    created = file_id.get("time_created")
+    if serial and created:
+        return f"fit:{serial}:{created}"
+    if started_on:
+        return f"fit:{started_on}"
+    return title
+
+
+def _fit_datetime_text(seconds: int) -> str:
+    return (FIT_EPOCH + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def _fit_compressed_timestamp(last_timestamp: int | None, offset: int) -> int | None:
+    if last_timestamp is None:
+        return None
+    timestamp = (last_timestamp & ~0x1F) + offset
+    if timestamp < last_timestamp:
+        timestamp += 0x20
+    return timestamp
+
+
+def _fit_scaled(value: object, scale: float) -> object:
+    if isinstance(value, list):
+        return [None if item is None else item / scale for item in value]
+    return value / scale if value is not None else None
+
+
+def _fit_number(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_record_time(records: list[dict[str, Any]]) -> object:
+    for record in records:
+        if record.get("timestamp"):
+            return record["timestamp"]
+    return None
+
+
+def _compact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value not in (None, [], {})}
+
+
 def _date_text(value: str | None) -> str | None:
     if value in (None, ""):
         return None
@@ -449,10 +811,19 @@ def _is_tcx_name(name: str) -> bool:
     return lower.endswith(".tcx") or lower.endswith(".tcx.gz")
 
 
+def _is_fit_path(path: Path) -> bool:
+    return _is_fit_name(str(path))
+
+
+def _is_fit_name(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(".fit") or lower.endswith(".fit.gz")
+
+
 def _display_stem(name: str) -> str:
     base = Path(name).name
     lower = base.lower()
-    for suffix in (".tcx.gz", ".tcx"):
+    for suffix in (".tcx.gz", ".fit.gz", ".tcx", ".fit"):
         if lower.endswith(suffix):
             return base[: -len(suffix)]
     return Path(base).stem

@@ -24,7 +24,7 @@ Then open `http://127.0.0.1:8000`.
 - Sprint and lap entries can be added manually from the local web UI.
 - Calibration constants, resistance scaling factors, calibration tests, and mass records can be edited from the local web UI.
 - Strava/Kinomap import can later write into `raw_activities`; the review screen separates new items, possible duplicates, missing-HR items, and already logged history.
-- Raw activity CSV/JSON/TCX/TCX.GZ files, Strava bulk export ZIPs, or folders containing those files, can be imported into the review queue from the local UI or `import-activities` CLI command.
+- Raw activity CSV/JSON/TCX/TCX.GZ/FIT/FIT.GZ files, Strava bulk export ZIPs, or folders containing those files, can be imported into the review queue from the local UI or `import-activities` CLI command.
 - Reviewed raw activities can be imported into sprint or lap entries from the local UI, with manual HR captured before promotion.
 - TCX-derived source metrics such as peak windows, cadence, speed, and variability are surfaced on the dashboard and in `source_metrics.csv`.
 - Calculated metrics are generated from the database, not stored as spreadsheet formulas.
