@@ -20,12 +20,14 @@ from workout_tracker.web import (
     delete_entry,
     dismiss_duplicate_pair,
     find_activity_duplicate,
+    fit_calibration_source_rows,
     grouped_table,
     import_activity_file_to_review,
     parse_post_params,
     populate_missing_duplicate_hr,
     render_insights,
     render_entries,
+    render_calibration,
     render_maintenance,
     review_actions,
     calibration_coverage_rows,
@@ -598,6 +600,77 @@ class WebActionTests(unittest.TestCase):
             "SELECT scaling FROM resistance_scaling WHERE resistance = 6"
         ).fetchone()["scaling"]
         self.assertAlmostEqual(scaling, 0.1859555556)
+
+    def test_fit_calibration_preview_uses_imported_fit_source_defaults(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "fit-cal-source",
+                "title": "Steady calibration effort",
+                "started_on": "2026-05-14T10:00:00Z",
+                "duration_seconds": "300",
+                "raw_distance": "4.2",
+                "hr": "120",
+                "raw_payload": json.dumps(
+                    {
+                        "format": "fit",
+                        "average_watts": 350,
+                        "average_cadence": 126,
+                    }
+                ),
+            },
+        )
+        raw_id = self.conn.execute(
+            "SELECT id FROM raw_activities WHERE source_activity_id = ?",
+            ("fit-cal-source",),
+        ).fetchone()["id"]
+
+        preview = calculate_resistance_calibration_preview(
+            self.conn,
+            {
+                "source_raw_activity_id": str(raw_id),
+                "resistance": "6",
+            },
+        )
+
+        self.assertEqual(preview["tested_on"], "2026-05-14")
+        self.assertAlmostEqual(preview["duration_minutes"], 5.0)
+        self.assertAlmostEqual(preview["device_watts"], 350.0)
+        self.assertEqual(preview["hr"], 120)
+        self.assertAlmostEqual(preview["mass_kg"], 80.0)
+        self.assertAlmostEqual(preview["expected_watts"], 185.9555556)
+        self.assertAlmostEqual(preview["calculated_scaling"], 0.5313015873)
+        self.assertIn("Steady calibration effort", preview["notes"])
+
+    def test_render_calibration_lists_fit_assisted_sources(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "fit-cal-source",
+                "title": "Steady calibration effort",
+                "started_on": "2026-05-14T10:00:00Z",
+                "duration_seconds": "300",
+                "raw_distance": "4.2",
+                "raw_payload": json.dumps(
+                    {
+                        "format": "fit",
+                        "average_watts": 350,
+                        "average_cadence": 126,
+                    }
+                ),
+            },
+        )
+
+        sources = fit_calibration_source_rows(self.conn)
+        html = render_calibration(self.conn)
+
+        self.assertEqual(len(sources), 1)
+        self.assertIn("FIT-Assisted Calibration Test", html)
+        self.assertIn("Steady calibration effort", html)
+        self.assertIn('name="source_raw_activity_id"', html)
+        self.assertIn("Preview factor", html)
 
     def test_add_and_update_mass_log(self):
         add_mass_log(self.conn, {"measured_on": "2026-05-04", "mass_kg": "79.5"})

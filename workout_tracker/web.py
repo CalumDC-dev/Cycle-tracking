@@ -24,6 +24,7 @@ from .calculations import (
     daily_summary,
     device_distance_for_length,
     estimated_watts_from_hr,
+    mass_for_date,
     suggest_activity_classification,
 )
 from .database import connect, init_db
@@ -780,6 +781,7 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     profile = editable_calibration_profile(conn)
     resistance_rows = resistance_scaling_rows(conn)
     mass_rows = conn.execute("SELECT id, measured_on, mass_kg FROM mass_log ORDER BY measured_on DESC").fetchall()
+    fit_sources = fit_calibration_source_rows(conn)
     tests = conn.execute(
         """
         SELECT *
@@ -823,6 +825,11 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     <button type="submit">Preview factor</button>
   </form>
   {calibration_preview_panel(preview)}
+</section>
+<section class="band">
+  <h2>FIT-Assisted Calibration Test</h2>
+  {calibration_protocol_panel()}
+  {fit_calibration_sources_table(fit_sources)}
 </section>
 <section class="band">
   <h2>Mass Log</h2>
@@ -995,6 +1002,73 @@ def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object
             "last_tested": test_row["last_tested"] if test_row else "",
         })
     return rows
+
+
+def fit_calibration_source_rows(conn: sqlite3.Connection, limit: int = 12) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT id, source, source_activity_id, title, started_on, duration_seconds,
+               hr, raw_payload, imported_at
+        FROM raw_activities
+        WHERE raw_payload IS NOT NULL AND raw_payload != ''
+        ORDER BY COALESCE(started_on, imported_at) DESC, id DESC
+        LIMIT 80
+        """
+    ).fetchall()
+    output = []
+    for row in rows:
+        source = fit_calibration_source_defaults(conn, row)
+        if source is not None:
+            output.append(source)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def fit_calibration_source_defaults(
+    conn: sqlite3.Connection,
+    row_or_id: sqlite3.Row | int,
+) -> dict[str, object] | None:
+    row = row_or_id
+    if isinstance(row_or_id, int):
+        row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (row_or_id,)).fetchone()
+        if row is None:
+            return None
+    payload = raw_payload_dict(row)
+    if payload.get("format") != "fit":
+        return None
+    device_watts = payload_number(payload, "average_watts") or payload_number(payload, "session_average_watts")
+    if device_watts is None:
+        return None
+    tested_on = date_part(row["started_on"])
+    duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
+    if duration_minutes is None:
+        duration_seconds = payload_number(payload, "sample_duration_seconds")
+        duration_minutes = duration_seconds / 60 if duration_seconds is not None else None
+    hr = row["hr"] if row["hr"] is not None else payload_number(payload, "average_source_hr")
+    mass_kg = mass_for_date(conn, tested_on) if tested_on is not None else None
+    title = row["title"] or row["source_activity_id"] or f"Raw activity {row['id']}"
+    return {
+        "id": row["id"],
+        "date": tested_on,
+        "title": title,
+        "duration_minutes": duration_minutes,
+        "device_watts": device_watts,
+        "cadence": payload_number(payload, "average_cadence"),
+        "hr": hr,
+        "mass_kg": mass_kg,
+        "notes": f"FIT calibration source raw activity #{row['id']} - {title}",
+    }
+
+
+def payload_number(payload: dict[str, object], key: str) -> float | None:
+    value = payload.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def resistance_counts(conn: sqlite3.Connection, table_name: str) -> dict[int, int]:
@@ -1685,6 +1759,46 @@ def mass_log_table(rows: list[sqlite3.Row]) -> str:
   </tr></tbody></table>
 </form>""")
     return "".join(rendered)
+
+
+def calibration_protocol_panel() -> str:
+    return """
+<div class="muted" style="margin-bottom:12px;">
+  Warm up first, run a steady 5 minute effort at one resistance level, keep cadence stable, import the FIT file, then preview the factor using the activity watts plus your average HR.
+</div>"""
+
+
+def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<div class="empty">No FIT source activities with device watts have been imported yet.</div>'
+    body = []
+    for row in rows:
+        body.append(f"""
+<tr>
+  <td>{escape(str(row["date"] or ""))}<br><span class="muted">{escape(str(row["title"] or ""))}</span></td>
+  <td>{fmt_minutes(row["duration_minutes"])}</td>
+  <td>{fmt_num(row["device_watts"], 1)}</td>
+  <td>{fmt_num(row["cadence"], 1)}</td>
+  <td>{fmt_num(row["hr"], 0)}</td>
+  <td>
+    <form class="stack" method="post" action="/calibration/test/preview">
+      <input type="hidden" name="source_raw_activity_id" value="{row['id']}">
+      <label>Resistance<select name="resistance" required>{resistance_select_options()}</select></label>
+      <label>Average HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}"></label>
+      <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(row['mass_kg'])}"></label>
+      <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
+      <label>Notes<input name="notes" value="{escape(str(row['notes']))}"></label>
+      <button type="submit">Preview factor</button>
+    </form>
+  </td>
+</tr>""")
+    return f"""
+<div class="table-scroll">
+  <table>
+    <thead><tr><th>Activity</th><th>Time</th><th>Device watts</th><th>Cadence</th><th>HR</th><th>Calibration input</th></tr></thead>
+    <tbody>{''.join(body)}</tbody>
+  </table>
+</div>"""
 
 
 def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
@@ -2995,16 +3109,29 @@ def update_resistance_scaling(conn: sqlite3.Connection, params: dict[str, str]) 
 
 
 def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, str]) -> dict[str, object]:
-    tested_on = required(params, "tested_on")
+    source_id = maybe_int(params.get("source_raw_activity_id"))
+    source_defaults = fit_calibration_source_defaults(conn, source_id) if source_id is not None else None
+    if source_id is not None and source_defaults is None:
+        raise ValueError("FIT calibration source was not found or does not contain device watts.")
+
+    tested_on = empty_to_none(params.get("tested_on")) or (source_defaults or {}).get("date")
+    if tested_on is None:
+        raise ValueError("Date is required.")
     resistance = maybe_int(params.get("resistance"))
     if resistance is None:
         raise ValueError("Resistance is required.")
     device_watts = maybe_float(params.get("device_watts"))
+    if device_watts is None and source_defaults is not None:
+        device_watts = maybe_float(str(source_defaults["device_watts"]))
     if device_watts is None or device_watts <= 0:
         raise ValueError("Device watts must be greater than zero.")
 
     mass_kg = maybe_float(params.get("mass_kg"))
+    if mass_kg is None and source_defaults is not None:
+        mass_kg = maybe_float(source_defaults.get("mass_kg"))
     hr = maybe_int(params.get("hr"))
+    if hr is None and source_defaults is not None:
+        hr = maybe_int(source_defaults.get("hr"))
     expected_watts = maybe_float(params.get("expected_watts"))
     if expected_watts is None:
         expected_watts = estimated_watts_from_hr(conn, hr, mass_kg)
@@ -3021,10 +3148,14 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
     if current_scaling:
         change_pct = (calculated_scaling - current_scaling) / current_scaling
 
+    duration_minutes = maybe_float(params.get("duration_minutes"))
+    if duration_minutes is None and source_defaults is not None:
+        duration_minutes = maybe_float(source_defaults.get("duration_minutes"))
+
     return {
         "tested_on": tested_on,
         "resistance": resistance,
-        "duration_minutes": maybe_float(params.get("duration_minutes")),
+        "duration_minutes": duration_minutes,
         "device_watts": device_watts,
         "expected_watts": expected_watts,
         "hr": hr,
@@ -3032,7 +3163,8 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
         "calculated_scaling": calculated_scaling,
         "current_scaling": current_scaling,
         "change_pct": change_pct,
-        "notes": empty_to_none(params.get("notes")),
+        "notes": empty_to_none(params.get("notes")) or (source_defaults or {}).get("notes"),
+        "source_raw_activity_id": source_id,
     }
 
 
