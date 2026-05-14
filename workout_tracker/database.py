@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS resistance_calibration_tests (
     mass_kg REAL,
     calculated_scaling REAL NOT NULL,
     notes TEXT,
+    source TEXT,
+    source_activity_id TEXT,
+    source_title TEXT,
+    source_started_on TEXT,
+    source_file TEXT,
+    file_sha256 TEXT,
+    raw_payload TEXT,
+    quality_flags TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -183,6 +191,14 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "raw_activities", "duplicate_entry_id", "INTEGER")
     _ensure_column(conn, "raw_activities", "duplicate_confidence", "REAL")
     _ensure_column(conn, "raw_activities", "duplicate_reason", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_activity_id", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_title", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_started_on", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_file", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "file_sha256", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "raw_payload", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "quality_flags", "TEXT")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

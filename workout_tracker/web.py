@@ -10,6 +10,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 from pathlib import Path
+import hashlib
 import tempfile
 from urllib.parse import parse_qs, urlparse
 import json
@@ -829,6 +830,7 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
 <section class="band">
   <h2>FIT-Assisted Calibration Test</h2>
   {calibration_protocol_panel()}
+  {fit_calibration_upload_form()}
   {fit_calibration_sources_table(fit_sources)}
 </section>
 <section class="band">
@@ -1048,6 +1050,7 @@ def fit_calibration_source_defaults(
     hr = row["hr"] if row["hr"] is not None else payload_number(payload, "average_source_hr")
     mass_kg = mass_for_date(conn, tested_on) if tested_on is not None else None
     title = row["title"] or row["source_activity_id"] or f"Raw activity {row['id']}"
+    quality_flags = calibration_quality_flags(duration_minutes, payload, hr)
     return {
         "id": row["id"],
         "date": tested_on,
@@ -1058,7 +1061,85 @@ def fit_calibration_source_defaults(
         "hr": hr,
         "mass_kg": mass_kg,
         "notes": f"FIT calibration source raw activity #{row['id']} - {title}",
+        "source": row["source"],
+        "source_activity_id": row["source_activity_id"],
+        "source_title": title,
+        "source_started_on": row["started_on"],
+        "source_file": None,
+        "file_sha256": None,
+        "raw_payload": row["raw_payload"],
+        "quality_flags": quality_flags,
     }
+
+
+def uploaded_fit_calibration_source_defaults(
+    conn: sqlite3.Connection,
+    params: dict[str, FormValue],
+) -> dict[str, object] | None:
+    upload = params.get("calibration_upload")
+    if not isinstance(upload, UploadedFile) or not upload.filename or not upload.content:
+        return None
+    source = empty_to_none(params.get("source")) or "strava"
+    rows = load_uploaded_activity_file(upload, source)
+    if len(rows) != 1:
+        raise ValueError("Calibration upload must contain exactly one FIT activity.")
+    row = rows[0]
+    payload = raw_payload_dict(row)
+    if payload.get("format") != "fit":
+        raise ValueError("Calibration upload must be a FIT file.")
+    device_watts = payload_number(payload, "average_watts") or payload_number(payload, "session_average_watts")
+    if device_watts is None:
+        raise ValueError("Calibration FIT did not contain device watts.")
+    tested_on = date_part(row.get("started_on"))
+    duration_minutes = duration_seconds_to_minutes(row.get("duration_seconds"))
+    if duration_minutes is None:
+        duration_seconds = payload_number(payload, "sample_duration_seconds")
+        duration_minutes = duration_seconds / 60 if duration_seconds is not None else None
+    hr = row.get("hr") if row.get("hr") is not None else payload_number(payload, "average_source_hr")
+    mass_kg = mass_for_date(conn, tested_on) if tested_on is not None else None
+    title = row.get("title") or row.get("source_activity_id") or Path(upload.filename).stem
+    quality_flags = calibration_quality_flags(duration_minutes, payload, hr)
+    return {
+        "id": None,
+        "date": tested_on,
+        "title": title,
+        "duration_minutes": duration_minutes,
+        "device_watts": device_watts,
+        "cadence": payload_number(payload, "average_cadence"),
+        "hr": hr,
+        "mass_kg": mass_kg,
+        "notes": f"FIT calibration upload - {title}",
+        "source": source,
+        "source_activity_id": row.get("source_activity_id"),
+        "source_title": title,
+        "source_started_on": row.get("started_on"),
+        "source_file": Path(upload.filename).name,
+        "file_sha256": hashlib.sha256(upload.content).hexdigest(),
+        "raw_payload": row.get("raw_payload"),
+        "quality_flags": quality_flags,
+    }
+
+
+def calibration_quality_flags(
+    duration_minutes: float | None,
+    payload: dict[str, object],
+    hr: object,
+) -> str | None:
+    flags = []
+    if duration_minutes is None:
+        flags.append("Duration missing")
+    elif duration_minutes < 4.5:
+        flags.append("Shorter than 5 minute target")
+    elif duration_minutes > 6.5:
+        flags.append("Longer than 5 minute target")
+    cadence_variability = payload_number(payload, "cadence_variability_pct")
+    if cadence_variability is not None and cadence_variability > 10:
+        flags.append("Cadence varied by more than 10%")
+    if payload_number(payload, "average_cadence") is None:
+        flags.append("Average cadence missing")
+    if maybe_int(hr) is None:
+        flags.append("HR missing")
+    return "; ".join(flags) if flags else None
 
 
 def payload_number(payload: dict[str, object], key: str) -> float | None:
@@ -1688,8 +1769,12 @@ def default_promotion_notes(row: sqlite3.Row) -> str:
 def raw_payload_dict(row: sqlite3.Row) -> dict[str, object]:
     if not row["raw_payload"]:
         return {}
+    return payload_from_text(row["raw_payload"])
+
+
+def payload_from_text(raw_payload: object) -> dict[str, object]:
     try:
-        payload = json.loads(row["raw_payload"])
+        payload = json.loads(str(raw_payload))
     except (TypeError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -1764,8 +1849,22 @@ def mass_log_table(rows: list[sqlite3.Row]) -> str:
 def calibration_protocol_panel() -> str:
     return """
 <div class="muted" style="margin-bottom:12px;">
-  Warm up first, run a steady 5 minute effort at one resistance level, keep cadence stable, import the FIT file, then preview the factor using the activity watts plus your average HR.
+  Warm up first, run a steady 5 minute effort at one resistance level, keep cadence stable, then upload the FIT file here so it is used for calibration rather than added to the workout review queue.
 </div>"""
+
+
+def fit_calibration_upload_form() -> str:
+    return f"""
+<form class="stack" method="post" action="/calibration/test/preview" enctype="multipart/form-data" style="margin-bottom:14px;">
+  <label>Source<input name="source" value="strava" required></label>
+  <label>Calibration FIT<input name="calibration_upload" type="file" accept=".fit,.fit.gz" required></label>
+  <label>Resistance<select name="resistance" required>{resistance_select_options(4)}</select></label>
+  <label>Average HR<input name="hr" type="number" min="0"></label>
+  <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0"></label>
+  <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
+  <label>Notes<input name="notes"></label>
+  <button type="submit">Preview calibration file</button>
+</form>"""
 
 
 def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
@@ -1773,13 +1872,14 @@ def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
         return '<div class="empty">No FIT source activities with device watts have been imported yet.</div>'
     body = []
     for row in rows:
+        quality = f'<br><span class="muted">{escape(str(row["quality_flags"]))}</span>' if row.get("quality_flags") else ""
         body.append(f"""
 <tr>
   <td>{escape(str(row["date"] or ""))}<br><span class="muted">{escape(str(row["title"] or ""))}</span></td>
   <td>{fmt_minutes(row["duration_minutes"])}</td>
   <td>{fmt_num(row["device_watts"], 1)}</td>
   <td>{fmt_num(row["cadence"], 1)}</td>
-  <td>{fmt_num(row["hr"], 0)}</td>
+  <td>{fmt_num(row["hr"], 0)}{quality}</td>
   <td>
     <form class="stack" method="post" action="/calibration/test/preview">
       <input type="hidden" name="source_raw_activity_id" value="{row['id']}">
@@ -1803,7 +1903,7 @@ def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
 
 def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
     return table(
-        ["Date", "Resistance", "Device watts", "Expected watts", "HR", "Mass", "Scaling", "Notes"],
+        ["Date", "Resistance", "Device watts", "Expected watts", "HR", "Mass", "Scaling", "Source", "Quality", "Notes"],
         [
             [
                 row["tested_on"],
@@ -1813,6 +1913,8 @@ def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
                 row["hr"],
                 fmt_num(row["mass_kg"], 2),
                 fmt_num(row["calculated_scaling"], 4),
+                calibration_test_source_label(row),
+                row["quality_flags"],
                 row["notes"],
             ]
             for row in rows
@@ -1820,11 +1922,23 @@ def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
     )
 
 
+def calibration_test_source_label(row: sqlite3.Row) -> str:
+    if row["source_title"]:
+        return str(row["source_title"])
+    if row["source_file"]:
+        return str(row["source_file"])
+    if row["source_activity_id"]:
+        return str(row["source_activity_id"])
+    return str(row["source"] or "")
+
+
 def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     if preview is None:
         return ""
     current = preview.get("current_scaling")
     change = preview.get("change_pct")
+    source = calibration_preview_source(preview)
+    quality = calibration_preview_quality(preview)
     return f"""
 <div class="band" style="margin-top:14px;">
   <h2>Preview Factor</h2>
@@ -1836,11 +1950,33 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     {metric("Current factor", fmt_num(current, 4) if current is not None else "None", "blue")}
     {metric("Change", signed_percent(change), "amber")}
   </div>
+  {source}
+  {quality}
   <form method="post" action="/calibration/test/apply" style="margin-top:14px;">
     {hidden_calibration_inputs(preview)}
     <button type="submit">Apply factor</button>
   </form>
 </div>"""
+
+
+def calibration_preview_source(preview: dict[str, object]) -> str:
+    pieces = []
+    if preview.get("source"):
+        pieces.append(str(preview["source"]))
+    if preview.get("source_title"):
+        pieces.append(str(preview["source_title"]))
+    if preview.get("source_file"):
+        pieces.append(str(preview["source_file"]))
+    if not pieces:
+        return ""
+    return f'<div class="muted" style="margin-top:12px;">Source: {escape(" - ".join(pieces))}</div>'
+
+
+def calibration_preview_quality(preview: dict[str, object]) -> str:
+    flags = preview.get("quality_flags")
+    if not flags:
+        return ""
+    return f'<div class="empty" style="margin-top:12px;">Calibration check: {escape(str(flags))}</div>'
 
 
 def circuit_progress_table(rows: list[dict[str, object]]) -> str:
@@ -3108,9 +3244,11 @@ def update_resistance_scaling(conn: sqlite3.Connection, params: dict[str, str]) 
     conn.commit()
 
 
-def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, str]) -> dict[str, object]:
+def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, FormValue]) -> dict[str, object]:
     source_id = maybe_int(params.get("source_raw_activity_id"))
-    source_defaults = fit_calibration_source_defaults(conn, source_id) if source_id is not None else None
+    source_defaults = uploaded_fit_calibration_source_defaults(conn, params)
+    if source_defaults is None and source_id is not None:
+        source_defaults = fit_calibration_source_defaults(conn, source_id)
     if source_id is not None and source_defaults is None:
         raise ValueError("FIT calibration source was not found or does not contain device watts.")
 
@@ -3152,6 +3290,19 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
     if duration_minutes is None and source_defaults is not None:
         duration_minutes = maybe_float(source_defaults.get("duration_minutes"))
 
+    source = empty_to_none(params.get("source")) or (source_defaults or {}).get("source")
+    source_activity_id = empty_to_none(params.get("source_activity_id")) or (source_defaults or {}).get("source_activity_id")
+    source_title = empty_to_none(params.get("source_title")) or (source_defaults or {}).get("source_title")
+    source_started_on = empty_to_none(params.get("source_started_on")) or (source_defaults or {}).get("source_started_on")
+    source_file = empty_to_none(params.get("source_file")) or (source_defaults or {}).get("source_file")
+    file_sha256 = empty_to_none(params.get("file_sha256")) or (source_defaults or {}).get("file_sha256")
+    raw_payload = empty_to_none(params.get("raw_payload")) or (source_defaults or {}).get("raw_payload")
+    quality_flags = empty_to_none(params.get("quality_flags")) or (source_defaults or {}).get("quality_flags")
+    if raw_payload and empty_to_none(params.get("quality_flags")) is None:
+        payload = payload_from_text(raw_payload)
+        if payload.get("format") == "fit":
+            quality_flags = calibration_quality_flags(duration_minutes, payload, hr)
+
     return {
         "tested_on": tested_on,
         "resistance": resistance,
@@ -3165,18 +3316,28 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
         "change_pct": change_pct,
         "notes": empty_to_none(params.get("notes")) or (source_defaults or {}).get("notes"),
         "source_raw_activity_id": source_id,
+        "source": source,
+        "source_activity_id": source_activity_id,
+        "source_title": source_title,
+        "source_started_on": source_started_on,
+        "source_file": source_file,
+        "file_sha256": file_sha256,
+        "raw_payload": raw_payload,
+        "quality_flags": quality_flags,
     }
 
 
-def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
     preview = calculate_resistance_calibration_preview(conn, params)
     conn.execute(
         """
         INSERT INTO resistance_calibration_tests (
             tested_on, resistance, duration_minutes, device_watts,
-            expected_watts, hr, mass_kg, calculated_scaling, notes
+            expected_watts, hr, mass_kg, calculated_scaling, notes,
+            source, source_activity_id, source_title, source_started_on,
+            source_file, file_sha256, raw_payload, quality_flags
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             preview["tested_on"],
@@ -3188,6 +3349,14 @@ def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, 
             preview["mass_kg"],
             preview["calculated_scaling"],
             preview["notes"],
+            preview["source"],
+            preview["source_activity_id"],
+            preview["source_title"],
+            preview["source_started_on"],
+            preview["source_file"],
+            preview["file_sha256"],
+            preview["raw_payload"],
+            preview["quality_flags"],
         ),
     )
     conn.execute(
@@ -3279,6 +3448,14 @@ def hidden_calibration_inputs(preview: dict[str, object]) -> str:
         "hr",
         "mass_kg",
         "notes",
+        "source",
+        "source_activity_id",
+        "source_title",
+        "source_started_on",
+        "source_file",
+        "file_sha256",
+        "raw_payload",
+        "quality_flags",
     ]
     inputs = []
     for field in fields:

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from workout_tracker.calculations import calculated_laps, calculated_sprints
 from workout_tracker.database import init_db
+import workout_tracker.web as web_module
 from workout_tracker.web import (
     add_raw_activity,
     add_lap_entry,
@@ -671,6 +673,81 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Steady calibration effort", html)
         self.assertIn('name="source_raw_activity_id"', html)
         self.assertIn("Preview factor", html)
+
+    def test_fit_calibration_upload_preview_persists_source_metadata(self):
+        upload_bytes = b"fake-fit-bytes"
+        payload = json.dumps(
+            {
+                "format": "fit",
+                "average_watts": 350,
+                "average_cadence": 126,
+                "cadence_variability_pct": 4,
+            },
+            sort_keys=True,
+        )
+
+        def fake_load_activity_file(path, source):
+            return [
+                {
+                    "source": source,
+                    "source_activity_id": "fit:calibration-source",
+                    "title": "Resistance 6 calibration",
+                    "started_on": "2026-05-14T10:00:00Z",
+                    "duration_seconds": 300,
+                    "raw_distance": 4.2,
+                    "hr": None,
+                    "raw_payload": payload,
+                }
+            ]
+
+        original = web_module.load_activity_file
+        web_module.load_activity_file = fake_load_activity_file
+        try:
+            preview = calculate_resistance_calibration_preview(
+                self.conn,
+                {
+                    "source": "strava",
+                    "calibration_upload": UploadedFile("resistance_6.fit", upload_bytes),
+                    "resistance": "6",
+                    "hr": "120",
+                },
+            )
+            apply_params = {key: "" if value is None else str(value) for key, value in preview.items()}
+            add_resistance_calibration_test(self.conn, apply_params)
+        finally:
+            web_module.load_activity_file = original
+
+        self.assertEqual(preview["tested_on"], "2026-05-14")
+        self.assertAlmostEqual(preview["duration_minutes"], 5.0)
+        self.assertAlmostEqual(preview["device_watts"], 350.0)
+        self.assertEqual(preview["source_file"], "resistance_6.fit")
+        self.assertEqual(preview["file_sha256"], hashlib.sha256(upload_bytes).hexdigest())
+        self.assertIsNone(preview["quality_flags"])
+        row = self.conn.execute(
+            """
+            SELECT source, source_activity_id, source_title, source_started_on,
+                   source_file, file_sha256, raw_payload, quality_flags
+            FROM resistance_calibration_tests
+            WHERE resistance = 6
+            """
+        ).fetchone()
+        self.assertEqual(row["source"], "strava")
+        self.assertEqual(row["source_activity_id"], "fit:calibration-source")
+        self.assertEqual(row["source_title"], "Resistance 6 calibration")
+        self.assertEqual(row["source_started_on"], "2026-05-14T10:00:00Z")
+        self.assertEqual(row["source_file"], "resistance_6.fit")
+        self.assertEqual(row["file_sha256"], hashlib.sha256(upload_bytes).hexdigest())
+        self.assertEqual(row["raw_payload"], payload)
+        self.assertIsNone(row["quality_flags"])
+        raw_count = self.conn.execute("SELECT COUNT(*) AS count FROM raw_activities").fetchone()["count"]
+        self.assertEqual(raw_count, 0)
+
+    def test_render_calibration_has_direct_fit_upload(self):
+        html = render_calibration(self.conn)
+
+        self.assertIn('name="calibration_upload"', html)
+        self.assertIn("Preview calibration file", html)
+        self.assertIn('enctype="multipart/form-data"', html)
 
     def test_add_and_update_mass_log(self):
         add_mass_log(self.conn, {"measured_on": "2026-05-04", "mass_kg": "79.5"})
