@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS calibration_profiles (
     name TEXT NOT NULL UNIQUE,
     length_scale REAL NOT NULL,
     distance_per_stroke REAL,
+    mechanical_efficiency REAL NOT NULL DEFAULT 0.22,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -184,6 +185,7 @@ def reset_db(conn: sqlite3.Connection) -> None:
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
+    _ensure_column(conn, "calibration_profiles", "mechanical_efficiency", "REAL NOT NULL DEFAULT 0.22")
     _ensure_column(conn, "sprint_entries", "started_at", "TEXT")
     _ensure_column(conn, "lap_entries", "started_at", "TEXT")
     _ensure_column(conn, "raw_activities", "hr", "INTEGER")

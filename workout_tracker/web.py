@@ -24,6 +24,7 @@ from .calculations import (
     dashboard_metrics,
     daily_summary,
     device_distance_for_length,
+    estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
     mass_for_date,
     suggest_activity_classification,
@@ -799,6 +800,7 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     <label>Name<input name="name" value="{escape(str(profile['name']))}" required></label>
     <label>Length scale<input name="length_scale" type="number" step="0.000001" min="0" value="{fmt_raw(profile['length_scale'])}" required></label>
     <label>Distance per stroke<input name="distance_per_stroke" type="number" step="0.000001" min="0" value="{fmt_raw(profile['distance_per_stroke'])}"></label>
+    <label>Mechanical efficiency<input name="mechanical_efficiency" type="number" step="0.001" min="0" max="1" value="{fmt_raw(profile['mechanical_efficiency'])}" required></label>
     <button type="submit">Save constants</button>
   </form>
 </section>
@@ -1939,6 +1941,7 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     change = preview.get("change_pct")
     source = calibration_preview_source(preview)
     quality = calibration_preview_quality(preview)
+    expected_note = calibration_expected_watts_note(preview)
     return f"""
 <div class="band" style="margin-top:14px;">
   <h2>Preview Factor</h2>
@@ -1950,6 +1953,7 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     {metric("Current factor", fmt_num(current, 4) if current is not None else "None", "blue")}
     {metric("Change", signed_percent(change), "amber")}
   </div>
+  {expected_note}
   {source}
   {quality}
   <form method="post" action="/calibration/test/apply" style="margin-top:14px;">
@@ -1957,6 +1961,17 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     <button type="submit">Apply factor</button>
   </form>
 </div>"""
+
+
+def calibration_expected_watts_note(preview: dict[str, object]) -> str:
+    if preview.get("expected_watts_source") != "HR/MET x mechanical efficiency":
+        return ""
+    return (
+        '<div class="muted" style="margin-top:12px;">'
+        f'Expected watts: {fmt_num(preview.get("metabolic_watts"), 1)} metabolic W '
+        f'x {fmt_percent(preview.get("mechanical_efficiency"))} mechanical efficiency.'
+        "</div>"
+    )
 
 
 def calibration_preview_source(preview: dict[str, object]) -> str:
@@ -3186,6 +3201,15 @@ def validated_resistance(value: str | None) -> int | None:
     return resistance
 
 
+def mechanical_efficiency_value(value: str | None) -> float:
+    efficiency = maybe_float(value)
+    if efficiency is None:
+        efficiency = 0.22
+    if not 0 < efficiency <= 1:
+        raise ValueError("Mechanical efficiency must be between 0 and 1.")
+    return efficiency
+
+
 def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
     profile = conn.execute(
         "SELECT * FROM calibration_profiles WHERE active = 1 ORDER BY id LIMIT 1"
@@ -3193,8 +3217,8 @@ def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
     if profile is None:
         conn.execute(
             """
-            INSERT INTO calibration_profiles (name, length_scale, distance_per_stroke, active)
-            VALUES ('Default under-desk bike', 0.45, NULL, 1)
+            INSERT INTO calibration_profiles (name, length_scale, distance_per_stroke, mechanical_efficiency, active)
+            VALUES ('Default under-desk bike', 0.45, NULL, 0.22, 1)
             """
         )
         conn.commit()
@@ -3207,13 +3231,14 @@ def update_calibration_profile(conn: sqlite3.Connection, params: dict[str, str])
     conn.execute(
         """
         UPDATE calibration_profiles
-        SET name = ?, length_scale = ?, distance_per_stroke = ?, active = 1
+        SET name = ?, length_scale = ?, distance_per_stroke = ?, mechanical_efficiency = ?, active = 1
         WHERE id = ?
         """,
         (
             required(params, "name"),
             float(required(params, "length_scale")),
             maybe_float(params.get("distance_per_stroke")),
+            mechanical_efficiency_value(params.get("mechanical_efficiency")),
             profile_id,
         ),
     )
@@ -3270,9 +3295,15 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
     hr = maybe_int(params.get("hr"))
     if hr is None and source_defaults is not None:
         hr = maybe_int(source_defaults.get("hr"))
+    profile = editable_calibration_profile(conn)
+    mechanical_efficiency = mechanical_efficiency_value(params.get("mechanical_efficiency") or profile["mechanical_efficiency"])
+    metabolic_watts = None
+    expected_watts_source = "manual"
     expected_watts = maybe_float(params.get("expected_watts"))
     if expected_watts is None:
-        expected_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+        metabolic_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+        expected_watts = estimated_mechanical_watts_from_hr(conn, hr, mass_kg, mechanical_efficiency)
+        expected_watts_source = "HR/MET x mechanical efficiency"
     if expected_watts is None or expected_watts <= 0:
         raise ValueError("Expected watts, or HR and mass kg, are required.")
 
@@ -3309,6 +3340,9 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
         "duration_minutes": duration_minutes,
         "device_watts": device_watts,
         "expected_watts": expected_watts,
+        "expected_watts_source": expected_watts_source,
+        "metabolic_watts": metabolic_watts,
+        "mechanical_efficiency": mechanical_efficiency,
         "hr": hr,
         "mass_kg": mass_kg,
         "calculated_scaling": calculated_scaling,
@@ -3524,6 +3558,12 @@ def signed_percent(value: object) -> str:
     if value is None:
         return ""
     return f"{float(value):+,.1%}"
+
+
+def fmt_percent(value: object) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.1%}"
 
 
 def fmt_minutes(value: object) -> str:

@@ -8,6 +8,7 @@ from workout_tracker.calculations import (
     daily_summary,
     dashboard_metrics,
     device_distance_for_length,
+    estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
     suggest_activity_classification,
 )
@@ -49,6 +50,11 @@ class CalculationTests(unittest.TestCase):
         watts = estimated_watts_from_hr(self.conn, 130, 80)
 
         self.assertAlmostEqual(watts, 297.5288888889)
+
+    def test_estimated_mechanical_watts_from_hr_applies_efficiency(self):
+        watts = estimated_mechanical_watts_from_hr(self.conn, 130, 80, 0.22)
+
+        self.assertAlmostEqual(watts, 65.4563555556)
 
     def test_daily_summary_combines_sprint_and_lap_outputs(self):
         summary = daily_summary(self.conn)

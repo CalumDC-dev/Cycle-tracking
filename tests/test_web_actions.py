@@ -517,6 +517,7 @@ class WebActionTests(unittest.TestCase):
                 "name": "Updated",
                 "length_scale": "0.42",
                 "distance_per_stroke": "2.1",
+                "mechanical_efficiency": "0.23",
             },
         )
 
@@ -524,6 +525,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(profile["name"], "Updated")
         self.assertAlmostEqual(profile["length_scale"], 0.42)
         self.assertAlmostEqual(profile["distance_per_stroke"], 2.1)
+        self.assertAlmostEqual(profile["mechanical_efficiency"], 0.23)
 
     def test_update_resistance_scaling_manual_factors(self):
         update_resistance_scaling(
@@ -601,7 +603,7 @@ class WebActionTests(unittest.TestCase):
         scaling = self.conn.execute(
             "SELECT scaling FROM resistance_scaling WHERE resistance = 6"
         ).fetchone()["scaling"]
-        self.assertAlmostEqual(scaling, 0.1859555556)
+        self.assertAlmostEqual(scaling, 0.0409102222)
 
     def test_fit_calibration_preview_uses_imported_fit_source_defaults(self):
         add_raw_activity(
@@ -641,8 +643,11 @@ class WebActionTests(unittest.TestCase):
         self.assertAlmostEqual(preview["device_watts"], 350.0)
         self.assertEqual(preview["hr"], 120)
         self.assertAlmostEqual(preview["mass_kg"], 80.0)
-        self.assertAlmostEqual(preview["expected_watts"], 185.9555556)
-        self.assertAlmostEqual(preview["calculated_scaling"], 0.5313015873)
+        self.assertAlmostEqual(preview["expected_watts"], 40.9102222)
+        self.assertAlmostEqual(preview["calculated_scaling"], 0.1168863492)
+        self.assertAlmostEqual(preview["metabolic_watts"], 185.9555556)
+        self.assertAlmostEqual(preview["mechanical_efficiency"], 0.22)
+        self.assertEqual(preview["expected_watts_source"], "HR/MET x mechanical efficiency")
         self.assertIn("Steady calibration effort", preview["notes"])
 
     def test_render_calibration_lists_fit_assisted_sources(self):

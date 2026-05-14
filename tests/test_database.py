@@ -80,6 +80,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("duplicate_entry_id", raw_columns)
         self.assertIn("duplicate_confidence", raw_columns)
         self.assertIn("duplicate_reason", raw_columns)
+        self.assertIn("mechanical_efficiency", self._columns(conn, "calibration_profiles"))
         self.assertIn("started_at", sprint_columns)
         self.assertIn("started_at", lap_columns)
         self.assertIn("source_activity_id", calibration_columns)

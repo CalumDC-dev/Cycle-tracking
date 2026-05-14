@@ -97,6 +97,18 @@ def estimated_watts_from_hr(conn: sqlite3.Connection, hr: int | None, mass_kg: f
     return met * mass_kg * 4184 / 3600
 
 
+def estimated_mechanical_watts_from_hr(
+    conn: sqlite3.Connection,
+    hr: int | None,
+    mass_kg: float | None,
+    mechanical_efficiency: float | None,
+) -> float | None:
+    metabolic_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+    if metabolic_watts is None or mechanical_efficiency is None:
+        return None
+    return metabolic_watts * mechanical_efficiency
+
+
 def mass_for_date(conn: sqlite3.Connection, performed_on: str) -> float | None:
     row = conn.execute(
         """
