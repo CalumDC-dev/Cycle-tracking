@@ -1048,7 +1048,7 @@ class WebActionTests(unittest.TestCase):
         self.assertAlmostEqual(lap["lap_time_minutes"], 4.0)
         self.assertEqual(lap["hr"], 132)
 
-    def test_promote_raw_activity_requires_hr_and_prevents_double_import(self):
+    def test_promote_raw_activity_requires_hr_and_tolerates_double_submit(self):
         add_raw_activity(
             self.conn,
             {
@@ -1080,16 +1080,20 @@ class WebActionTests(unittest.TestCase):
                 "hr": "126",
             },
         )
-        with self.assertRaises(ValueError):
-            promote_raw_activity(
-                self.conn,
-                {
-                    "id": str(raw_id),
-                    "session_type": "sprint",
-                    "performed_on": "2026-05-12",
-                    "hr": "126",
-                },
-            )
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "sprint",
+                "performed_on": "2026-05-12",
+                "hr": "126",
+            },
+        )
+        total = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM sprint_entries WHERE raw_activity_id = ?",
+            (raw_id,),
+        ).fetchone()["total"]
+        self.assertEqual(total, 1)
 
     def test_import_activity_file_to_review_applies_duplicate_and_hr_status(self):
         add_sprint_entry(

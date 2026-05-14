@@ -2609,6 +2609,8 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
     if row is None:
         raise ValueError("Raw activity was not found.")
+    if row["review_status"] == "imported" and raw_activity_has_entry(conn, raw_id):
+        return
     if row["review_status"] in ("already_logged", "imported"):
         raise ValueError("Raw activity has already been handled.")
     if raw_activity_has_entry(conn, raw_id):
