@@ -282,6 +282,8 @@ button.secondary {
 
 STRONG_DUPLICATE_THRESHOLD = 0.85
 POSSIBLE_DUPLICATE_THRESHOLD = 0.6
+MIN_RESISTANCE = 1
+MAX_RESISTANCE = 16
 
 
 @dataclass(frozen=True)
@@ -996,7 +998,7 @@ def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object
     sprint_counts = resistance_counts(conn, "sprint_entries")
     lap_counts = resistance_counts(conn, "lap_entries")
     rows = []
-    for resistance in range(1, 13):
+    for resistance in resistance_values():
         test_row = tests.get(resistance)
         rows.append({
             "resistance": resistance,
@@ -1755,7 +1757,7 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
         <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
         <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
         <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
-        <label>Resistance<input name="resistance" type="number" min="1" max="12" value="{fmt_raw(resistance)}" required></label>
+        <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
         <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
         <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
         <label>Entry number<input name="entry_index" type="number" min="1"></label>
@@ -2906,8 +2908,8 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     resistance = maybe_int(params.get("resistance"))
     if resistance is None:
         resistance = 4
-    if resistance < 1 or resistance > 12:
-        raise ValueError("Resistance must be between 1 and 12.")
+    if not is_valid_resistance(resistance):
+        raise ValueError(resistance_error_message())
     rpm = maybe_float(params.get("rpm"))
     if rpm is None:
         rpm = maybe_float(str(payload.get("average_cadence"))) if payload.get("average_cadence") is not None else None
@@ -3202,9 +3204,17 @@ def dismiss_duplicate_pair(conn: sqlite3.Connection, params: dict[str, FormValue
 
 def validated_resistance(value: str | None) -> int | None:
     resistance = maybe_int(value)
-    if resistance is not None and not 1 <= resistance <= 12:
-        raise ValueError("Resistance must be between 1 and 12.")
+    if resistance is not None and not is_valid_resistance(resistance):
+        raise ValueError(resistance_error_message())
     return resistance
+
+
+def is_valid_resistance(resistance: int) -> bool:
+    return MIN_RESISTANCE <= resistance <= MAX_RESISTANCE
+
+
+def resistance_error_message() -> str:
+    return f"Resistance must be between {MIN_RESISTANCE} and {MAX_RESISTANCE}."
 
 
 def mechanical_efficiency_value(value: str | None) -> float:
@@ -3256,11 +3266,11 @@ def resistance_scaling_rows(conn: sqlite3.Connection) -> list[dict[str, object]]
         int(row["resistance"]): row["scaling"]
         for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
     }
-    return [{"resistance": resistance, "scaling": existing.get(resistance)} for resistance in range(1, 13)]
+    return [{"resistance": resistance, "scaling": existing.get(resistance)} for resistance in resistance_values()]
 
 
 def update_resistance_scaling(conn: sqlite3.Connection, params: dict[str, str]) -> None:
-    for resistance in range(1, 13):
+    for resistance in resistance_values():
         scaling = maybe_float(params.get(f"scaling_{resistance}"))
         if scaling is None:
             continue
@@ -3286,7 +3296,7 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
     tested_on = empty_to_none(params.get("tested_on")) or (source_defaults or {}).get("date")
     if tested_on is None:
         raise ValueError("Date is required.")
-    resistance = maybe_int(params.get("resistance"))
+    resistance = validated_resistance(params.get("resistance"))
     if resistance is None:
         raise ValueError("Resistance is required.")
     device_watts = maybe_float(params.get("device_watts"))
@@ -3486,8 +3496,12 @@ def circuit_goal_script() -> str:
 def resistance_select_options(selected: int | None = None) -> str:
     return "".join(
         f'<option value="{resistance}"{" selected" if selected == resistance else ""}>{resistance}</option>'
-        for resistance in range(1, 13)
+        for resistance in resistance_values()
     )
+
+
+def resistance_values() -> range:
+    return range(MIN_RESISTANCE, MAX_RESISTANCE + 1)
 
 
 def hidden_calibration_inputs(preview: dict[str, object]) -> str:

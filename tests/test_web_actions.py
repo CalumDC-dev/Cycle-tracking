@@ -533,7 +533,7 @@ class WebActionTests(unittest.TestCase):
             {
                 "scaling_1": "0.05",
                 "scaling_4": "0.15",
-                "scaling_12": "0.6",
+                "scaling_16": "0.6",
             },
         )
 
@@ -543,7 +543,7 @@ class WebActionTests(unittest.TestCase):
         }
         self.assertAlmostEqual(rows[1], 0.05)
         self.assertAlmostEqual(rows[4], 0.15)
-        self.assertAlmostEqual(rows[12], 0.6)
+        self.assertAlmostEqual(rows[16], 0.6)
 
     def test_add_resistance_calibration_test_uses_expected_watts(self):
         add_resistance_calibration_test(
@@ -1140,7 +1140,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="rpm" type="number" step="0.1" min="0" value="132.3"', html)
         self.assertIn('name="device_watts" type="number" step="0.1" min="0" value="347.7"', html)
         self.assertIn('name="duration_minutes" type="number" step="0.001" min="0" value="75.033"', html)
-        self.assertIn('name="resistance" type="number" min="1" max="12" value="4" required', html)
+        self.assertIn('name="resistance" type="number" min="1" max="16" value="4" required', html)
 
     def test_promote_raw_activity_defaults_missing_resistance_to_four(self):
         add_raw_activity(
