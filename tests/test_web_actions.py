@@ -494,6 +494,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(strength_rows[0]["resistance"], 8)
         self.assertEqual(coverage_rows[7]["resistance"], 8)
         self.assertAlmostEqual(coverage_rows[7]["scaling"], 0.12)
+        self.assertEqual(coverage_rows[7]["provenance"], "measured")
         self.assertIn("Circuit Progress", html)
         self.assertIn("Strength Signals", html)
         self.assertIn("Resistance Calibration Coverage", html)
@@ -565,12 +566,41 @@ class WebActionTests(unittest.TestCase):
         )
 
         rows = {
-            row["resistance"]: row["scaling"]
-            for row in self.conn.execute("SELECT resistance, scaling FROM resistance_scaling")
+            row["resistance"]: (row["scaling"], row["provenance"])
+            for row in self.conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling")
         }
-        self.assertAlmostEqual(rows[1], 0.05)
-        self.assertAlmostEqual(rows[4], 0.15)
-        self.assertAlmostEqual(rows[16], 0.6)
+        self.assertAlmostEqual(rows[1][0], 0.05)
+        self.assertEqual(rows[1][1], "manual")
+        self.assertAlmostEqual(rows[2][0], 0.0833333333)
+        self.assertEqual(rows[2][1], "interpolated")
+        self.assertAlmostEqual(rows[3][0], 0.1166666667)
+        self.assertEqual(rows[3][1], "interpolated")
+        self.assertAlmostEqual(rows[4][0], 0.15)
+        self.assertEqual(rows[4][1], "manual")
+        self.assertAlmostEqual(rows[16][0], 0.6)
+        self.assertEqual(rows[16][1], "manual")
+
+    def test_interpolated_resistance_factor_is_used_for_sprint_watts(self):
+        update_resistance_scaling(
+            self.conn,
+            {
+                "scaling_1": "0.05",
+                "scaling_4": "0.2",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-03",
+                "duration_minutes": "5",
+                "device_watts": "300",
+                "resistance": "2",
+            },
+        )
+
+        sprint = calculated_sprints(self.conn)[0]
+
+        self.assertAlmostEqual(sprint.estimated_watts, 30.0)
 
     def test_add_resistance_calibration_test_uses_expected_watts(self):
         add_resistance_calibration_test(
@@ -586,12 +616,13 @@ class WebActionTests(unittest.TestCase):
         )
 
         scaling = self.conn.execute(
-            "SELECT scaling FROM resistance_scaling WHERE resistance = 5"
-        ).fetchone()["scaling"]
+            "SELECT scaling, provenance FROM resistance_scaling WHERE resistance = 5"
+        ).fetchone()
         test = self.conn.execute(
             "SELECT calculated_scaling FROM resistance_calibration_tests WHERE resistance = 5"
         ).fetchone()
-        self.assertAlmostEqual(scaling, 0.2)
+        self.assertAlmostEqual(scaling["scaling"], 0.2)
+        self.assertEqual(scaling["provenance"], "measured")
         self.assertAlmostEqual(test["calculated_scaling"], 0.2)
 
     def test_calibration_preview_does_not_persist_factor(self):
@@ -702,6 +733,8 @@ class WebActionTests(unittest.TestCase):
 
         self.assertEqual(len(sources), 1)
         self.assertIn("FIT-Assisted Calibration Test", html)
+        self.assertIn("Performance Resistance Scaling", html)
+        self.assertIn("Performance factor", html)
         self.assertIn("14-05-2026", html)
         self.assertIn("Steady calibration effort", html)
         self.assertIn('name="source_raw_activity_id"', html)

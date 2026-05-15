@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS calibration_profiles (
 CREATE TABLE IF NOT EXISTS resistance_scaling (
     id INTEGER PRIMARY KEY,
     resistance INTEGER NOT NULL UNIQUE,
-    scaling REAL NOT NULL
+    scaling REAL NOT NULL,
+    provenance TEXT NOT NULL DEFAULT 'manual'
 );
 
 CREATE TABLE IF NOT EXISTS resistance_calibration_tests (
@@ -201,6 +202,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "resistance_calibration_tests", "file_sha256", "TEXT")
     _ensure_column(conn, "resistance_calibration_tests", "raw_payload", "TEXT")
     _ensure_column(conn, "resistance_calibration_tests", "quality_flags", "TEXT")
+    _ensure_column(conn, "resistance_scaling", "provenance", "TEXT NOT NULL DEFAULT 'manual'")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

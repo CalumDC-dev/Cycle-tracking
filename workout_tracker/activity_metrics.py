@@ -9,6 +9,8 @@ import math
 import sqlite3
 from typing import Any
 
+from .calculations import resistance_scale
+
 
 PEAK_WINDOWS = (5, 30, 60, 300)
 INACTIVE_WATTS_THRESHOLD = 1.0
@@ -128,6 +130,8 @@ def source_metric_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
         if not has_source_metrics(payload):
             continue
         scale = _float_or_none(row["resistance_scaling"])
+        if scale is None:
+            scale = resistance_scale(conn, row["resistance"])
         output.append(
             {
                 "id": row["id"],

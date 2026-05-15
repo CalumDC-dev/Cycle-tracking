@@ -27,6 +27,7 @@ from .calculations import (
     estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
     mass_for_date,
+    resistance_scale,
     suggest_activity_classification,
 )
 from .database import connect, init_db
@@ -789,6 +790,7 @@ def render_circuits(conn: sqlite3.Connection) -> str:
 
 
 def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | None = None) -> str:
+    refresh_interpolated_resistance_scaling(conn)
     profile = editable_calibration_profile(conn)
     resistance_rows = resistance_scaling_rows(conn)
     mass_rows = conn.execute("SELECT id, measured_on, mass_kg FROM mass_log ORDER BY measured_on DESC").fetchall()
@@ -815,10 +817,14 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
   </form>
 </section>
 <section class="band">
-  <h2>Resistance Scaling</h2>
+  <h2>Performance Resistance Scaling</h2>
+  <div class="muted" style="margin-bottom:12px;">
+    These factors turn inflated device watts into bike-relative estimated watts for performance comparisons.
+    Calorie estimates remain driven by HR/MET, mass, and time.
+  </div>
   <form method="post" action="/calibration/resistance/update">
     <table>
-      <thead><tr><th>Resistance</th><th>Scaling factor</th></tr></thead>
+      <thead><tr><th>Resistance</th><th>Performance factor</th><th>Source</th><th>Basis</th></tr></thead>
       <tbody>{''.join(resistance_factor_row(row) for row in resistance_rows)}</tbody>
     </table>
     <p><button type="submit">Save factors</button></p>
@@ -883,7 +889,7 @@ def render_insights(conn: sqlite3.Connection) -> str:
     {metric("Best circuit gain", best_circuit_gain(circuit_rows), "green")}
     {metric("Best sprint watts", fmt_num(max_sprint_watts(sprints), 1), "amber")}
     {metric("Strength signals", len(strength_rows), "blue")}
-    {metric("Calibrated levels", calibrated_resistance_count(calibration_rows), "blue")}
+    {metric("Scaling coverage", calibrated_resistance_count(calibration_rows), "blue")}
   </div>
 </section>
 <section class="band">
@@ -988,9 +994,13 @@ def is_strength_signal(resistance: object, rpm: object, min_resistance: int = 7,
 
 
 def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    refresh_interpolated_resistance_scaling(conn)
     scaling = {
-        int(row["resistance"]): row["scaling"]
-        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+        int(row["resistance"]): {
+            "scaling": row["scaling"],
+            "provenance": row["provenance"] or "manual",
+        }
+        for row in conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling").fetchall()
     }
     tests = {
         int(row["resistance"]): row
@@ -1007,9 +1017,11 @@ def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object
     rows = []
     for resistance in resistance_values():
         test_row = tests.get(resistance)
+        scaling_row = scaling.get(resistance, {})
         rows.append({
             "resistance": resistance,
-            "scaling": scaling.get(resistance),
+            "scaling": scaling_row.get("scaling"),
+            "provenance": scaling_row.get("provenance"),
             "sprint_sessions": sprint_counts.get(resistance, 0),
             "lap_sessions": lap_counts.get(resistance, 0),
             "calibration_tests": int(test_row["tests"]) if test_row else 0,
@@ -1839,11 +1851,25 @@ def source_metric_summary(row: sqlite3.Row) -> str:
 def resistance_factor_row(row: dict[str, object]) -> str:
     resistance = int(row["resistance"])
     scaling = row.get("scaling")
+    provenance = provenance_label(row.get("provenance"))
+    basis = row.get("basis") or ""
     return f"""
 <tr>
   <td>{resistance}</td>
   <td><input name="scaling_{resistance}" type="number" step="0.000001" min="0" value="{fmt_raw(scaling)}"></td>
+  <td>{escape(provenance)}</td>
+  <td>{escape(str(basis))}</td>
 </tr>"""
+
+
+def provenance_label(value: object) -> str:
+    text = str(value or "").strip().lower()
+    labels = {
+        "measured": "Measured",
+        "manual": "Manual",
+        "interpolated": "Interpolated",
+    }
+    return labels.get(text, "Needs factor" if not text else text.replace("_", " ").title())
 
 
 def mass_log_table(rows: list[sqlite3.Row]) -> str:
@@ -1957,6 +1983,7 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     source = calibration_preview_source(preview)
     quality = calibration_preview_quality(preview)
     expected_note = calibration_expected_watts_note(preview)
+    current_source = provenance_label(preview.get("current_provenance")) if preview.get("current_provenance") else "None"
     return f"""
 <div class="band" style="margin-top:14px;">
   <h2>Preview Factor</h2>
@@ -1964,8 +1991,9 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     {metric("Resistance", preview["resistance"], "blue")}
     {metric("Device watts", fmt_num(preview["device_watts"], 1), "amber")}
     {metric("Expected watts", fmt_num(preview["expected_watts"], 1), "green")}
-    {metric("Calculated factor", fmt_num(preview["calculated_scaling"], 4), "green")}
+    {metric("Calculated performance factor", fmt_num(preview["calculated_scaling"], 4), "green")}
     {metric("Current factor", fmt_num(current, 4) if current is not None else "None", "blue")}
+    {metric("Current source", current_source, "blue")}
     {metric("Change", signed_percent(change), "amber")}
   </div>
   {expected_note}
@@ -2075,11 +2103,11 @@ def strength_signals_table(rows: list[dict[str, object]]) -> str:
 
 def calibration_coverage_table(rows: list[dict[str, object]]) -> str:
     return table(
-        ["Resistance", "Status", "Scaling", "Sprint sessions", "Lap sessions", "Tests", "Last tested"],
+        ["Resistance", "Status", "Performance factor", "Sprint sessions", "Lap sessions", "Tests", "Last tested"],
         [
             [
                 row["resistance"],
-                "Calibrated" if row["scaling"] is not None else "Needs factor",
+                resistance_factor_status(row),
                 fmt_num(row["scaling"], 4),
                 row["sprint_sessions"],
                 row["lap_sessions"],
@@ -2089,6 +2117,12 @@ def calibration_coverage_table(rows: list[dict[str, object]]) -> str:
             for row in rows
         ],
     )
+
+
+def resistance_factor_status(row: dict[str, object]) -> str:
+    if row.get("scaling") is None:
+        return "Needs factor"
+    return provenance_label(row.get("provenance"))
 
 
 def daily_table(rows: list[dict[str, object]]) -> str:
@@ -3290,27 +3324,119 @@ def update_calibration_profile(conn: sqlite3.Connection, params: dict[str, str])
 
 
 def resistance_scaling_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    refresh_interpolated_resistance_scaling(conn)
     existing = {
-        int(row["resistance"]): row["scaling"]
-        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+        int(row["resistance"]): {
+            "scaling": row["scaling"],
+            "provenance": row["provenance"] or "manual",
+        }
+        for row in conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling").fetchall()
     }
-    return [{"resistance": resistance, "scaling": existing.get(resistance)} for resistance in resistance_values()]
+    anchors = resistance_scaling_anchors(conn)
+    rows = []
+    for resistance in resistance_values():
+        existing_row = existing.get(resistance, {})
+        rows.append({
+            "resistance": resistance,
+            "scaling": existing_row.get("scaling"),
+            "provenance": existing_row.get("provenance"),
+            "basis": interpolation_basis_label(anchors, resistance, existing_row.get("provenance")),
+        })
+    return rows
 
 
 def update_resistance_scaling(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+    existing = {
+        int(row["resistance"]): row
+        for row in conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling").fetchall()
+    }
     for resistance in resistance_values():
         scaling = maybe_float(params.get(f"scaling_{resistance}"))
         if scaling is None:
             continue
+        existing_row = existing.get(resistance)
+        if existing_row is not None and same_float(existing_row["scaling"], scaling):
+            continue
         conn.execute(
             """
-            INSERT INTO resistance_scaling (resistance, scaling)
-            VALUES (?, ?)
-            ON CONFLICT(resistance) DO UPDATE SET scaling = excluded.scaling
+            INSERT INTO resistance_scaling (resistance, scaling, provenance)
+            VALUES (?, ?, 'manual')
+            ON CONFLICT(resistance) DO UPDATE SET
+                scaling = excluded.scaling,
+                provenance = excluded.provenance
+            """,
+            (resistance, scaling),
+        )
+    refresh_interpolated_resistance_scaling(conn)
+    conn.commit()
+
+
+def refresh_interpolated_resistance_scaling(conn: sqlite3.Connection) -> None:
+    anchors = resistance_scaling_anchors(conn)
+    desired: dict[int, float] = {}
+    for (lower_resistance, lower_scaling), (upper_resistance, upper_scaling) in zip(anchors, anchors[1:]):
+        if upper_resistance - lower_resistance <= 1:
+            continue
+        for resistance in resistance_values():
+            if not lower_resistance < resistance < upper_resistance:
+                continue
+            progress = (resistance - lower_resistance) / (upper_resistance - lower_resistance)
+            desired[resistance] = lower_scaling + ((upper_scaling - lower_scaling) * progress)
+
+    existing = {
+        int(row["resistance"]): float(row["scaling"])
+        for row in conn.execute(
+            "SELECT resistance, scaling FROM resistance_scaling WHERE provenance = 'interpolated'"
+        ).fetchall()
+    }
+    if existing.keys() == desired.keys() and all(same_float(existing[key], desired[key]) for key in desired):
+        return
+
+    conn.execute("DELETE FROM resistance_scaling WHERE provenance = 'interpolated'")
+    for resistance, scaling in desired.items():
+        conn.execute(
+            """
+            INSERT INTO resistance_scaling (resistance, scaling, provenance)
+            VALUES (?, ?, 'interpolated')
+            ON CONFLICT(resistance) DO NOTHING
             """,
             (resistance, scaling),
         )
     conn.commit()
+
+
+def resistance_scaling_anchors(conn: sqlite3.Connection) -> list[tuple[int, float]]:
+    rows = conn.execute(
+        """
+        SELECT resistance, scaling
+        FROM resistance_scaling
+        WHERE COALESCE(provenance, 'manual') != 'interpolated'
+        ORDER BY resistance
+        """
+    ).fetchall()
+    return [(int(row["resistance"]), float(row["scaling"])) for row in rows]
+
+
+def interpolation_basis_label(anchors: list[tuple[int, float]], resistance: int, provenance: object) -> str:
+    if provenance != "interpolated":
+        return ""
+    lower: int | None = None
+    upper: int | None = None
+    for anchor_resistance, _scaling in anchors:
+        if anchor_resistance < resistance:
+            lower = anchor_resistance
+        elif anchor_resistance > resistance and upper is None:
+            upper = anchor_resistance
+    if lower is None or upper is None:
+        return ""
+    return f"{lower}-{upper}"
+
+
+def same_float(left: object, right: object, tolerance: float = 0.0000005) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except (TypeError, ValueError):
+        return False
 
 
 def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, FormValue]) -> dict[str, object]:
@@ -3353,10 +3479,11 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
 
     calculated_scaling = expected_watts / device_watts
     current = conn.execute(
-        "SELECT scaling FROM resistance_scaling WHERE resistance = ?",
+        "SELECT scaling, provenance FROM resistance_scaling WHERE resistance = ?",
         (resistance,),
     ).fetchone()
-    current_scaling = float(current["scaling"]) if current else None
+    current_scaling = resistance_scale(conn, resistance)
+    current_provenance = current["provenance"] if current else ("interpolated" if current_scaling is not None else None)
     change_pct = None
     if current_scaling:
         change_pct = (calculated_scaling - current_scaling) / current_scaling
@@ -3391,6 +3518,7 @@ def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: d
         "mass_kg": mass_kg,
         "calculated_scaling": calculated_scaling,
         "current_scaling": current_scaling,
+        "current_provenance": current_provenance,
         "change_pct": change_pct,
         "notes": empty_to_none(params.get("notes")) or (source_defaults or {}).get("notes"),
         "source_raw_activity_id": source_id,
@@ -3439,12 +3567,15 @@ def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, 
     )
     conn.execute(
         """
-        INSERT INTO resistance_scaling (resistance, scaling)
-        VALUES (?, ?)
-        ON CONFLICT(resistance) DO UPDATE SET scaling = excluded.scaling
+        INSERT INTO resistance_scaling (resistance, scaling, provenance)
+        VALUES (?, ?, 'measured')
+        ON CONFLICT(resistance) DO UPDATE SET
+            scaling = excluded.scaling,
+            provenance = excluded.provenance
         """,
         (preview["resistance"], preview["calculated_scaling"]),
     )
+    refresh_interpolated_resistance_scaling(conn)
     conn.commit()
 
 

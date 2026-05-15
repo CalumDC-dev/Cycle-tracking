@@ -71,11 +71,47 @@ def device_distance_for_length(length: float | None, length_scale: float | None)
 def resistance_scale(conn: sqlite3.Connection, resistance: int | None) -> float | None:
     if resistance is None:
         return None
-    row = conn.execute(
-        "SELECT scaling FROM resistance_scaling WHERE resistance = ?",
-        (resistance,),
-    ).fetchone()
-    return float(row["scaling"]) if row else None
+    resistance = int(resistance)
+    rows = conn.execute(
+        """
+        SELECT resistance, scaling, COALESCE(provenance, 'manual') AS provenance
+        FROM resistance_scaling
+        WHERE scaling IS NOT NULL
+        ORDER BY resistance
+        """
+    ).fetchall()
+    exact = next((row for row in rows if int(row["resistance"]) == resistance), None)
+    if exact is not None and str(exact["provenance"]) != "interpolated":
+        return float(exact["scaling"])
+    interpolated = interpolated_resistance_scale(rows, resistance)
+    if interpolated is not None:
+        return interpolated
+    return float(exact["scaling"]) if exact is not None else None
+
+
+def interpolated_resistance_scale(rows: list[sqlite3.Row], resistance: int) -> float | None:
+    anchors = [
+        (int(row["resistance"]), float(row["scaling"]))
+        for row in rows
+        if str(row["provenance"] or "manual") != "interpolated"
+    ]
+    lower: tuple[int, float] | None = None
+    upper: tuple[int, float] | None = None
+    for anchor_resistance, anchor_scaling in anchors:
+        if anchor_resistance == resistance:
+            return anchor_scaling
+        if anchor_resistance < resistance:
+            lower = (anchor_resistance, anchor_scaling)
+        elif anchor_resistance > resistance and upper is None:
+            upper = (anchor_resistance, anchor_scaling)
+    if lower is None or upper is None:
+        return None
+    lower_resistance, lower_scaling = lower
+    upper_resistance, upper_scaling = upper
+    if upper_resistance == lower_resistance:
+        return lower_scaling
+    progress = (resistance - lower_resistance) / (upper_resistance - lower_resistance)
+    return lower_scaling + ((upper_scaling - lower_scaling) * progress)
 
 
 def met_for_hr(conn: sqlite3.Connection, hr: int | None) -> float | None:

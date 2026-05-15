@@ -87,6 +87,47 @@ class ActivityMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["device_average_watts"], 250)
         self.assertEqual(rows[0]["data_quality_flags"], "missing_source_hr")
 
+    def test_source_metric_rows_uses_interpolated_resistance_scaling(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.executemany(
+            "INSERT INTO resistance_scaling (resistance, scaling) VALUES (?, ?)",
+            [(1, 0.05), (4, 0.2)],
+        )
+        conn.execute(
+            """
+            INSERT INTO raw_activities (
+                id, source, source_activity_id, title, started_on, review_status,
+                session_type, raw_payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "strava",
+                "interp",
+                "Interpolated source",
+                "2026-05-12T08:00:00",
+                "already_logged",
+                "sprint",
+                json.dumps({"average_watts": 300}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sprint_entries (performed_on, resistance, raw_activity_id)
+            VALUES ('2026-05-12', 2, 1)
+            """
+        )
+        conn.commit()
+
+        rows = source_metric_rows(conn)
+        conn.close()
+
+        self.assertEqual(rows[0]["resistance"], 2)
+        self.assertAlmostEqual(rows[0]["average_watts"], 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()

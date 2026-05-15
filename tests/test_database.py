@@ -66,6 +66,13 @@ class DatabaseMigrationTests(unittest.TestCase):
                 notes TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE resistance_scaling (
+                id INTEGER PRIMARY KEY,
+                resistance INTEGER NOT NULL UNIQUE,
+                scaling REAL NOT NULL
+            );
+            INSERT INTO resistance_scaling (resistance, scaling)
+            VALUES (4, 0.15);
             """
         )
 
@@ -75,6 +82,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         sprint_columns = self._columns(conn, "sprint_entries")
         lap_columns = self._columns(conn, "lap_entries")
         calibration_columns = self._columns(conn, "resistance_calibration_tests")
+        resistance_columns = self._columns(conn, "resistance_scaling")
         self.assertIn("hr", raw_columns)
         self.assertIn("duplicate_entry_type", raw_columns)
         self.assertIn("duplicate_entry_id", raw_columns)
@@ -88,6 +96,9 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("file_sha256", calibration_columns)
         self.assertIn("raw_payload", calibration_columns)
         self.assertIn("quality_flags", calibration_columns)
+        self.assertIn("provenance", resistance_columns)
+        provenance = conn.execute("SELECT provenance FROM resistance_scaling WHERE resistance = 4").fetchone()[0]
+        self.assertEqual(provenance, "manual")
         self.assertTrue(self._table_exists(conn, "duplicate_dismissals"))
         conn.close()
 
