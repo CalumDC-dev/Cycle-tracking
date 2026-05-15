@@ -1477,7 +1477,7 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
     for item in items:
         rows.append([
             escape(str(item["category"])),
-            escape(str(item["date"])),
+            escape(fmt_date(item["date"])),
             escape(str(item["start"])),
             escape(str(item["area"])),
             escape(str(item["record"])),
@@ -1667,7 +1667,7 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], rea
 <tr>
   <td>{escape(str(row['source']))}</td>
   <td>{escape(str(row['title'] or ''))}</td>
-  <td>{escape(str(row['started_on'] or ''))}</td>
+  <td>{escape(fmt_datetime(row['started_on']))}</td>
   <td>{fmt_num(row['raw_distance'], 3)}<br><span class="muted">{source_metric_summary(row)}</span></td>
   <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
   <td>{duplicate_match_label(row)}</td>
@@ -1892,7 +1892,7 @@ def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
         quality = f'<br><span class="muted">{escape(str(row["quality_flags"]))}</span>' if row.get("quality_flags") else ""
         body.append(f"""
 <tr>
-  <td>{escape(str(row["date"] or ""))}<br><span class="muted">{escape(str(row["title"] or ""))}</span></td>
+  <td>{escape(fmt_date(row["date"]))}<br><span class="muted">{escape(str(row["title"] or ""))}</span></td>
   <td>{fmt_minutes(row["duration_minutes"])}</td>
   <td>{fmt_num(row["device_watts"], 1)}</td>
   <td>{fmt_num(row["cadence"], 1)}</td>
@@ -1923,7 +1923,7 @@ def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
         ["Date", "Resistance", "Device watts", "Expected watts", "HR", "Mass", "Scaling", "Source", "Quality", "Notes"],
         [
             [
-                row["tested_on"],
+                fmt_date(row["tested_on"]),
                 row["resistance"],
                 fmt_num(row["device_watts"], 1),
                 fmt_num(row["expected_watts"], 1),
@@ -2021,8 +2021,8 @@ def circuit_progress_table(rows: list[dict[str, object]]) -> str:
                 fmt_minutes(row["best_time"]),
                 fmt_minutes(row["average_time"]),
                 signed_minutes(row["change_minutes"]),
-                row["best_date"],
-                row["latest_date"],
+                fmt_date(row["best_date"]),
+                fmt_date(row["latest_date"]),
             ]
             for row in rows
         ],
@@ -2044,7 +2044,7 @@ def source_highlights_table(rows: list[dict[str, object]]) -> str:
         highlights.append([
             label,
             fmt_num(row.get(key), digits),
-            row.get("started_on", ""),
+            fmt_datetime(row.get("started_on", "")),
             row.get("session_type", ""),
             row.get("circuit", ""),
             row.get("resistance", ""),
@@ -2057,7 +2057,7 @@ def strength_signals_table(rows: list[dict[str, object]]) -> str:
         ["Date", "Start", "Type", "Session", "Resistance", "RPM", "Est watts", "HR", "Time", "Calories"],
         [
             [
-                row["date"],
+                fmt_date(row["date"]),
                 row["start"],
                 row["type"],
                 row["label"],
@@ -2084,7 +2084,7 @@ def calibration_coverage_table(rows: list[dict[str, object]]) -> str:
                 row["sprint_sessions"],
                 row["lap_sessions"],
                 row["calibration_tests"],
-                row["last_tested"],
+                fmt_date(row["last_tested"]),
             ]
             for row in rows
         ],
@@ -2096,7 +2096,7 @@ def daily_table(rows: list[dict[str, object]]) -> str:
         ["Date", "Sprints", "Laps", "Calories (HR/MET)", "Time", "Avg watts", "Avg RPM", "Lap distance", "Total distance"],
         [
             [
-                row["date"],
+                fmt_date(row["date"]),
                 row["sprint_count"],
                 row["lap_count"],
                 fmt_num(row["total_calories"], 1),
@@ -2117,7 +2117,7 @@ def weekly_distance_table(rows: list[dict[str, object]]) -> str:
         [
             [
                 f"{row['iso_year']}-W{int(row['iso_week']):02d}",
-                f"{row['week_start']} to {row['week_end']}",
+                f"{fmt_date(row['week_start'])} to {fmt_date(row['week_end'])}",
                 row["workout_days"],
                 fmt_num(row["distance_km"], 2),
                 fmt_num(row["distance_miles"], 2),
@@ -2140,7 +2140,7 @@ def best_laps_table(rows: list[dict[str, object]]) -> str:
             [
                 row["circuit_name"],
                 fmt_minutes(row["lap_time_minutes"]),
-                row["performed_on"],
+                fmt_date(row["performed_on"]),
                 fmt_num(row["length"], 3),
                 fmt_num(row["average_speed"], 2),
             ]
@@ -2154,7 +2154,7 @@ def source_metrics_table(rows: list[dict[str, object]]) -> str:
         ["Start", "Type", "Circuit", "Resistance", "Avg est watts", "Best 5m", "Best 60s", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
         [
             [
-                row["started_on"],
+                fmt_datetime(row["started_on"]),
                 row["session_type"],
                 row["circuit"],
                 row["resistance"],
@@ -2368,10 +2368,9 @@ def chart_axis_label(value: float, unit: str = "") -> str:
 
 def chart_edge_label(label: object) -> str:
     text = str(label)
-    if "T" in text:
-        return text.split("T", 1)[0]
-    if " " in text:
-        return text.split(" ", 1)[0]
+    parsed = parse_datetime(text)
+    if parsed is not None:
+        return fmt_date(parsed.date().isoformat())
     return text[:16]
 
 
@@ -3642,6 +3641,30 @@ def duration_seconds_to_minutes(value: object) -> float | None:
     if value is None or value == "":
         return None
     return float(value) / 60
+
+
+def fmt_date(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    parsed = parse_datetime(text)
+    if parsed is not None:
+        return parsed.strftime("%d-%m-%Y")
+    if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        return f"{text[8:10]}-{text[5:7]}-{text[0:4]}"
+    return text
+
+
+def fmt_datetime(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    parsed = parse_datetime(text)
+    if parsed is None:
+        return fmt_date(text)
+    if has_time_component(text):
+        return parsed.strftime("%d-%m-%Y %H:%M")
+    return parsed.strftime("%d-%m-%Y")
 
 
 def fmt_start_time(value: object) -> str:

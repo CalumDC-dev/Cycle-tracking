@@ -274,7 +274,7 @@ class WebActionTests(unittest.TestCase):
 
         self.assertIn("Weekly Distance", html)
         self.assertIn("2026-W18", html)
-        self.assertIn("2026-04-27 to 2026-05-03", html)
+        self.assertIn("27-04-2026 to 03-05-2026", html)
         self.assertIn("6.00", html)
         self.assertIn("3.73", html)
 
@@ -702,6 +702,7 @@ class WebActionTests(unittest.TestCase):
 
         self.assertEqual(len(sources), 1)
         self.assertIn("FIT-Assisted Calibration Test", html)
+        self.assertIn("14-05-2026", html)
         self.assertIn("Steady calibration effort", html)
         self.assertIn('name="source_raw_activity_id"', html)
         self.assertIn("Preview factor", html)
