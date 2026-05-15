@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from workout_tracker.calculations import calculated_laps, calculated_sprints
 from workout_tracker.database import init_db
+import workout_tracker.web as web_module
 from workout_tracker.web import (
     add_raw_activity,
     add_lap_entry,
@@ -20,12 +22,15 @@ from workout_tracker.web import (
     delete_entry,
     dismiss_duplicate_pair,
     find_activity_duplicate,
+    fit_calibration_source_rows,
     grouped_table,
     import_activity_file_to_review,
     parse_post_params,
     populate_missing_duplicate_hr,
+    render_dashboard,
     render_insights,
     render_entries,
+    render_calibration,
     render_maintenance,
     review_actions,
     calibration_coverage_rows,
@@ -247,6 +252,32 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
 
+    def test_render_dashboard_shows_weekly_distance_in_km_and_miles(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "duration_minutes": "5",
+                "device_distance": "8",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-03",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+            },
+        )
+
+        html = render_dashboard(self.conn)
+
+        self.assertIn("Weekly Distance", html)
+        self.assertIn("2026-W18", html)
+        self.assertIn("27-04-2026 to 03-05-2026", html)
+        self.assertIn("6.00", html)
+        self.assertIn("3.73", html)
+
     def test_maintenance_flags_possible_manual_duplicate_entries(self):
         add_sprint_entry(
             self.conn,
@@ -463,6 +494,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(strength_rows[0]["resistance"], 8)
         self.assertEqual(coverage_rows[7]["resistance"], 8)
         self.assertAlmostEqual(coverage_rows[7]["scaling"], 0.12)
+        self.assertEqual(coverage_rows[7]["provenance"], "measured")
         self.assertIn("Circuit Progress", html)
         self.assertIn("Strength Signals", html)
         self.assertIn("Resistance Calibration Coverage", html)
@@ -513,6 +545,7 @@ class WebActionTests(unittest.TestCase):
                 "name": "Updated",
                 "length_scale": "0.42",
                 "distance_per_stroke": "2.1",
+                "mechanical_efficiency": "0.23",
             },
         )
 
@@ -520,6 +553,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(profile["name"], "Updated")
         self.assertAlmostEqual(profile["length_scale"], 0.42)
         self.assertAlmostEqual(profile["distance_per_stroke"], 2.1)
+        self.assertAlmostEqual(profile["mechanical_efficiency"], 0.23)
 
     def test_update_resistance_scaling_manual_factors(self):
         update_resistance_scaling(
@@ -527,17 +561,46 @@ class WebActionTests(unittest.TestCase):
             {
                 "scaling_1": "0.05",
                 "scaling_4": "0.15",
-                "scaling_12": "0.6",
+                "scaling_16": "0.6",
             },
         )
 
         rows = {
-            row["resistance"]: row["scaling"]
-            for row in self.conn.execute("SELECT resistance, scaling FROM resistance_scaling")
+            row["resistance"]: (row["scaling"], row["provenance"])
+            for row in self.conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling")
         }
-        self.assertAlmostEqual(rows[1], 0.05)
-        self.assertAlmostEqual(rows[4], 0.15)
-        self.assertAlmostEqual(rows[12], 0.6)
+        self.assertAlmostEqual(rows[1][0], 0.05)
+        self.assertEqual(rows[1][1], "manual")
+        self.assertAlmostEqual(rows[2][0], 0.0833333333)
+        self.assertEqual(rows[2][1], "interpolated")
+        self.assertAlmostEqual(rows[3][0], 0.1166666667)
+        self.assertEqual(rows[3][1], "interpolated")
+        self.assertAlmostEqual(rows[4][0], 0.15)
+        self.assertEqual(rows[4][1], "manual")
+        self.assertAlmostEqual(rows[16][0], 0.6)
+        self.assertEqual(rows[16][1], "manual")
+
+    def test_interpolated_resistance_factor_is_used_for_sprint_watts(self):
+        update_resistance_scaling(
+            self.conn,
+            {
+                "scaling_1": "0.05",
+                "scaling_4": "0.2",
+            },
+        )
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-03",
+                "duration_minutes": "5",
+                "device_watts": "300",
+                "resistance": "2",
+            },
+        )
+
+        sprint = calculated_sprints(self.conn)[0]
+
+        self.assertAlmostEqual(sprint.estimated_watts, 30.0)
 
     def test_add_resistance_calibration_test_uses_expected_watts(self):
         add_resistance_calibration_test(
@@ -553,12 +616,13 @@ class WebActionTests(unittest.TestCase):
         )
 
         scaling = self.conn.execute(
-            "SELECT scaling FROM resistance_scaling WHERE resistance = 5"
-        ).fetchone()["scaling"]
+            "SELECT scaling, provenance FROM resistance_scaling WHERE resistance = 5"
+        ).fetchone()
         test = self.conn.execute(
             "SELECT calculated_scaling FROM resistance_calibration_tests WHERE resistance = 5"
         ).fetchone()
-        self.assertAlmostEqual(scaling, 0.2)
+        self.assertAlmostEqual(scaling["scaling"], 0.2)
+        self.assertEqual(scaling["provenance"], "measured")
         self.assertAlmostEqual(test["calculated_scaling"], 0.2)
 
     def test_calibration_preview_does_not_persist_factor(self):
@@ -597,7 +661,188 @@ class WebActionTests(unittest.TestCase):
         scaling = self.conn.execute(
             "SELECT scaling FROM resistance_scaling WHERE resistance = 6"
         ).fetchone()["scaling"]
-        self.assertAlmostEqual(scaling, 0.1859555556)
+        self.assertAlmostEqual(scaling, 0.0409102222)
+
+    def test_fit_calibration_preview_uses_imported_fit_source_defaults(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "fit-cal-source",
+                "title": "Steady calibration effort",
+                "started_on": "2026-05-14T10:00:00Z",
+                "duration_seconds": "300",
+                "raw_distance": "4.2",
+                "hr": "120",
+                "raw_payload": json.dumps(
+                    {
+                        "format": "fit",
+                        "average_watts": 350,
+                        "average_cadence": 126,
+                    }
+                ),
+            },
+        )
+        raw_id = self.conn.execute(
+            "SELECT id FROM raw_activities WHERE source_activity_id = ?",
+            ("fit-cal-source",),
+        ).fetchone()["id"]
+
+        preview = calculate_resistance_calibration_preview(
+            self.conn,
+            {
+                "source_raw_activity_id": str(raw_id),
+                "resistance": "6",
+            },
+        )
+
+        self.assertEqual(preview["tested_on"], "2026-05-14")
+        self.assertAlmostEqual(preview["duration_minutes"], 5.0)
+        self.assertAlmostEqual(preview["device_watts"], 350.0)
+        self.assertEqual(preview["hr"], 120)
+        self.assertAlmostEqual(preview["mass_kg"], 80.0)
+        self.assertAlmostEqual(preview["expected_watts"], 40.9102222)
+        self.assertAlmostEqual(preview["calculated_scaling"], 0.1168863492)
+        self.assertAlmostEqual(preview["metabolic_watts"], 185.9555556)
+        self.assertAlmostEqual(preview["mechanical_efficiency"], 0.22)
+        self.assertEqual(preview["expected_watts_source"], "HR/MET x mechanical efficiency")
+        self.assertIn("Steady calibration effort", preview["notes"])
+
+    def test_render_calibration_lists_fit_assisted_sources(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "fit-cal-source",
+                "title": "Steady calibration effort",
+                "started_on": "2026-05-14T10:00:00Z",
+                "duration_seconds": "300",
+                "raw_distance": "4.2",
+                "raw_payload": json.dumps(
+                    {
+                        "format": "fit",
+                        "average_watts": 350,
+                        "average_cadence": 126,
+                    }
+                ),
+            },
+        )
+
+        sources = fit_calibration_source_rows(self.conn)
+        html = render_calibration(self.conn)
+
+        self.assertEqual(len(sources), 1)
+        self.assertIn("FIT-Assisted Calibration Test", html)
+        self.assertIn("Performance Resistance Scaling", html)
+        self.assertIn("Performance factor", html)
+        self.assertIn("14-05-2026", html)
+        self.assertIn("Steady calibration effort", html)
+        self.assertIn('name="source_raw_activity_id"', html)
+        self.assertIn("Preview factor", html)
+
+    def test_fit_calibration_source_rows_exclude_non_protocol_durations(self):
+        for source_id, duration_seconds in [
+            ("too-short", "122"),
+            ("too-long", "1321"),
+        ]:
+            add_raw_activity(
+                self.conn,
+                {
+                    "source": "strava",
+                    "source_activity_id": source_id,
+                    "title": source_id,
+                    "started_on": "2026-05-14T10:00:00Z",
+                    "duration_seconds": duration_seconds,
+                    "raw_distance": "4.2",
+                    "raw_payload": json.dumps(
+                        {
+                            "format": "fit",
+                            "average_watts": 350,
+                            "average_cadence": 126,
+                        }
+                    ),
+                },
+            )
+
+        sources = fit_calibration_source_rows(self.conn)
+
+        self.assertEqual(sources, [])
+
+    def test_fit_calibration_upload_preview_persists_source_metadata(self):
+        upload_bytes = b"fake-fit-bytes"
+        payload = json.dumps(
+            {
+                "format": "fit",
+                "average_watts": 350,
+                "average_cadence": 126,
+                "cadence_variability_pct": 4,
+            },
+            sort_keys=True,
+        )
+
+        def fake_load_activity_file(path, source):
+            return [
+                {
+                    "source": source,
+                    "source_activity_id": "fit:calibration-source",
+                    "title": "Resistance 6 calibration",
+                    "started_on": "2026-05-14T10:00:00Z",
+                    "duration_seconds": 300,
+                    "raw_distance": 4.2,
+                    "hr": None,
+                    "raw_payload": payload,
+                }
+            ]
+
+        original = web_module.load_activity_file
+        web_module.load_activity_file = fake_load_activity_file
+        try:
+            preview = calculate_resistance_calibration_preview(
+                self.conn,
+                {
+                    "source": "strava",
+                    "calibration_upload": UploadedFile("resistance_6.fit", upload_bytes),
+                    "resistance": "6",
+                    "hr": "120",
+                },
+            )
+            apply_params = {key: "" if value is None else str(value) for key, value in preview.items()}
+            add_resistance_calibration_test(self.conn, apply_params)
+        finally:
+            web_module.load_activity_file = original
+
+        self.assertEqual(preview["tested_on"], "2026-05-14")
+        self.assertAlmostEqual(preview["duration_minutes"], 5.0)
+        self.assertAlmostEqual(preview["device_watts"], 350.0)
+        self.assertEqual(preview["source_file"], "resistance_6.fit")
+        self.assertEqual(preview["file_sha256"], hashlib.sha256(upload_bytes).hexdigest())
+        self.assertIsNone(preview["quality_flags"])
+        row = self.conn.execute(
+            """
+            SELECT source, source_activity_id, source_title, source_started_on,
+                   source_file, file_sha256, raw_payload, quality_flags
+            FROM resistance_calibration_tests
+            WHERE resistance = 6
+            """
+        ).fetchone()
+        self.assertEqual(row["source"], "strava")
+        self.assertEqual(row["source_activity_id"], "fit:calibration-source")
+        self.assertEqual(row["source_title"], "Resistance 6 calibration")
+        self.assertEqual(row["source_started_on"], "2026-05-14T10:00:00Z")
+        self.assertEqual(row["source_file"], "resistance_6.fit")
+        self.assertEqual(row["file_sha256"], hashlib.sha256(upload_bytes).hexdigest())
+        self.assertEqual(row["raw_payload"], payload)
+        self.assertIsNone(row["quality_flags"])
+        raw_count = self.conn.execute("SELECT COUNT(*) AS count FROM raw_activities").fetchone()["count"]
+        self.assertEqual(raw_count, 0)
+
+    def test_render_calibration_has_direct_fit_upload(self):
+        html = render_calibration(self.conn)
+
+        self.assertIn('name="calibration_upload"', html)
+        self.assertIn("Preview calibration file", html)
+        self.assertIn('enctype="multipart/form-data"', html)
+        self.assertIn('name="mass_kg" type="number" step="0.001" min="0" value="80"', html)
 
     def test_add_and_update_mass_log(self):
         add_mass_log(self.conn, {"measured_on": "2026-05-04", "mass_kg": "79.5"})
@@ -956,7 +1201,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="rpm" type="number" step="0.1" min="0" value="132.3"', html)
         self.assertIn('name="device_watts" type="number" step="0.1" min="0" value="347.7"', html)
         self.assertIn('name="duration_minutes" type="number" step="0.001" min="0" value="75.033"', html)
-        self.assertIn('name="resistance" type="number" min="1" max="12" value="4" required', html)
+        self.assertIn('name="resistance" type="number" min="1" max="16" value="4" required', html)
 
     def test_promote_raw_activity_defaults_missing_resistance_to_four(self):
         add_raw_activity(

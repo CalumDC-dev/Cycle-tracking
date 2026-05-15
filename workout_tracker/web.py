@@ -10,6 +10,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 from pathlib import Path
+import hashlib
 import tempfile
 from urllib.parse import parse_qs, urlparse
 import json
@@ -23,7 +24,10 @@ from .calculations import (
     dashboard_metrics,
     daily_summary,
     device_distance_for_length,
+    estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
+    mass_for_date,
+    resistance_scale,
     suggest_activity_classification,
 )
 from .database import connect, init_db
@@ -279,6 +283,8 @@ button.secondary {
 
 STRONG_DUPLICATE_THRESHOLD = 0.85
 POSSIBLE_DUPLICATE_THRESHOLD = 0.6
+MIN_RESISTANCE = 1
+MAX_RESISTANCE = 16
 
 
 @dataclass(frozen=True)
@@ -519,6 +525,8 @@ def page(title: str, body: str, active: str) -> str:
 def render_dashboard(conn: sqlite3.Connection) -> str:
     metrics = dashboard_metrics(conn)
     daily = metrics["daily"]
+    weekly_distance = metrics["weekly_distance"]
+    latest_week = weekly_distance[0] if weekly_distance else None
     source_rows = source_metric_rows(conn)
     calories = [(row["date"], row["total_calories"]) for row in daily]
     watts = [(row["date"], row["average_watts"] or 0) for row in daily]
@@ -533,6 +541,7 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
   <div class="metrics">
     {metric("Workout days", metrics["workout_days"], "green")}
     {metric("Total distance", fmt_num(metrics["total_distance"], 2), "green")}
+    {metric("Latest week", distance_km_miles(latest_week), "green")}
     {metric("Total calories", fmt_num(metrics["total_calories"], 0), "amber")}
     {metric("Workout time", fmt_minutes(metrics["total_minutes"]), "blue")}
     {metric("Sprints", metrics["sprint_count"], "blue")}
@@ -550,6 +559,10 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
     {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
     {metric("Best avg cadence", fmt_num(max_metric(source_rows, "average_cadence"), 0), "green")}
   </div>
+</section>
+<section class="band">
+  <h2>Weekly Distance</h2>
+  {weekly_distance_table(weekly_distance)}
 </section>
 <section class="band">
   <h2>Trends</h2>
@@ -777,9 +790,12 @@ def render_circuits(conn: sqlite3.Connection) -> str:
 
 
 def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | None = None) -> str:
+    refresh_interpolated_resistance_scaling(conn)
     profile = editable_calibration_profile(conn)
     resistance_rows = resistance_scaling_rows(conn)
     mass_rows = conn.execute("SELECT id, measured_on, mass_kg FROM mass_log ORDER BY measured_on DESC").fetchall()
+    current_mass_kg = latest_mass_kg(conn)
+    fit_sources = fit_calibration_source_rows(conn)
     tests = conn.execute(
         """
         SELECT *
@@ -796,14 +812,19 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     <label>Name<input name="name" value="{escape(str(profile['name']))}" required></label>
     <label>Length scale<input name="length_scale" type="number" step="0.000001" min="0" value="{fmt_raw(profile['length_scale'])}" required></label>
     <label>Distance per stroke<input name="distance_per_stroke" type="number" step="0.000001" min="0" value="{fmt_raw(profile['distance_per_stroke'])}"></label>
+    <label>Mechanical efficiency<input name="mechanical_efficiency" type="number" step="0.001" min="0" max="1" value="{fmt_raw(profile['mechanical_efficiency'])}" required></label>
     <button type="submit">Save constants</button>
   </form>
 </section>
 <section class="band">
-  <h2>Resistance Scaling</h2>
+  <h2>Performance Resistance Scaling</h2>
+  <div class="muted" style="margin-bottom:12px;">
+    These factors turn inflated device watts into bike-relative estimated watts for performance comparisons.
+    Calorie estimates remain driven by HR/MET, mass, and time.
+  </div>
   <form method="post" action="/calibration/resistance/update">
     <table>
-      <thead><tr><th>Resistance</th><th>Scaling factor</th></tr></thead>
+      <thead><tr><th>Resistance</th><th>Performance factor</th><th>Source</th><th>Basis</th></tr></thead>
       <tbody>{''.join(resistance_factor_row(row) for row in resistance_rows)}</tbody>
     </table>
     <p><button type="submit">Save factors</button></p>
@@ -818,11 +839,17 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
     <label>Device watts<input name="device_watts" type="number" step="0.001" min="0" required></label>
     <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
     <label>Average HR<input name="hr" type="number" min="0"></label>
-    <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0"></label>
+    <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(current_mass_kg)}"></label>
     <label>Notes<input name="notes"></label>
     <button type="submit">Preview factor</button>
   </form>
   {calibration_preview_panel(preview)}
+</section>
+<section class="band">
+  <h2>FIT-Assisted Calibration Test</h2>
+  {calibration_protocol_panel()}
+  {fit_calibration_upload_form(current_mass_kg)}
+  {fit_calibration_sources_table(fit_sources)}
 </section>
 <section class="band">
   <h2>Mass Log</h2>
@@ -862,7 +889,7 @@ def render_insights(conn: sqlite3.Connection) -> str:
     {metric("Best circuit gain", best_circuit_gain(circuit_rows), "green")}
     {metric("Best sprint watts", fmt_num(max_sprint_watts(sprints), 1), "amber")}
     {metric("Strength signals", len(strength_rows), "blue")}
-    {metric("Calibrated levels", calibrated_resistance_count(calibration_rows), "blue")}
+    {metric("Scaling coverage", calibrated_resistance_count(calibration_rows), "blue")}
   </div>
 </section>
 <section class="band">
@@ -967,9 +994,13 @@ def is_strength_signal(resistance: object, rpm: object, min_resistance: int = 7,
 
 
 def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    refresh_interpolated_resistance_scaling(conn)
     scaling = {
-        int(row["resistance"]): row["scaling"]
-        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+        int(row["resistance"]): {
+            "scaling": row["scaling"],
+            "provenance": row["provenance"] or "manual",
+        }
+        for row in conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling").fetchall()
     }
     tests = {
         int(row["resistance"]): row
@@ -984,17 +1015,170 @@ def calibration_coverage_rows(conn: sqlite3.Connection) -> list[dict[str, object
     sprint_counts = resistance_counts(conn, "sprint_entries")
     lap_counts = resistance_counts(conn, "lap_entries")
     rows = []
-    for resistance in range(1, 13):
+    for resistance in resistance_values():
         test_row = tests.get(resistance)
+        scaling_row = scaling.get(resistance, {})
         rows.append({
             "resistance": resistance,
-            "scaling": scaling.get(resistance),
+            "scaling": scaling_row.get("scaling"),
+            "provenance": scaling_row.get("provenance"),
             "sprint_sessions": sprint_counts.get(resistance, 0),
             "lap_sessions": lap_counts.get(resistance, 0),
             "calibration_tests": int(test_row["tests"]) if test_row else 0,
             "last_tested": test_row["last_tested"] if test_row else "",
         })
     return rows
+
+
+def fit_calibration_source_rows(conn: sqlite3.Connection, limit: int = 12) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT id, source, source_activity_id, title, started_on, duration_seconds,
+               hr, raw_payload, imported_at
+        FROM raw_activities
+        WHERE raw_payload IS NOT NULL AND raw_payload != ''
+        ORDER BY COALESCE(started_on, imported_at) DESC, id DESC
+        LIMIT 80
+        """
+    ).fetchall()
+    output = []
+    for row in rows:
+        source = fit_calibration_source_defaults(conn, row)
+        if source is not None and is_calibration_candidate_source(source):
+            output.append(source)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def fit_calibration_source_defaults(
+    conn: sqlite3.Connection,
+    row_or_id: sqlite3.Row | int,
+) -> dict[str, object] | None:
+    row = row_or_id
+    if isinstance(row_or_id, int):
+        row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (row_or_id,)).fetchone()
+        if row is None:
+            return None
+    payload = raw_payload_dict(row)
+    if payload.get("format") != "fit":
+        return None
+    device_watts = payload_number(payload, "average_watts") or payload_number(payload, "session_average_watts")
+    if device_watts is None:
+        return None
+    tested_on = date_part(row["started_on"])
+    duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
+    if duration_minutes is None:
+        duration_seconds = payload_number(payload, "sample_duration_seconds")
+        duration_minutes = duration_seconds / 60 if duration_seconds is not None else None
+    hr = row["hr"] if row["hr"] is not None else payload_number(payload, "average_source_hr")
+    mass_kg = mass_for_date(conn, tested_on) if tested_on is not None else None
+    title = row["title"] or row["source_activity_id"] or f"Raw activity {row['id']}"
+    quality_flags = calibration_quality_flags(duration_minutes, payload, hr)
+    return {
+        "id": row["id"],
+        "date": tested_on,
+        "title": title,
+        "duration_minutes": duration_minutes,
+        "device_watts": device_watts,
+        "cadence": payload_number(payload, "average_cadence"),
+        "hr": hr,
+        "mass_kg": mass_kg,
+        "notes": f"FIT calibration source raw activity #{row['id']} - {title}",
+        "source": row["source"],
+        "source_activity_id": row["source_activity_id"],
+        "source_title": title,
+        "source_started_on": row["started_on"],
+        "source_file": None,
+        "file_sha256": None,
+        "raw_payload": row["raw_payload"],
+        "quality_flags": quality_flags,
+    }
+
+
+def is_calibration_candidate_source(source: dict[str, object]) -> bool:
+    duration = maybe_float(source.get("duration_minutes"))
+    return duration is not None and 4.5 <= duration <= 6.5
+
+
+def uploaded_fit_calibration_source_defaults(
+    conn: sqlite3.Connection,
+    params: dict[str, FormValue],
+) -> dict[str, object] | None:
+    upload = params.get("calibration_upload")
+    if not isinstance(upload, UploadedFile) or not upload.filename or not upload.content:
+        return None
+    source = empty_to_none(params.get("source")) or "strava"
+    rows = load_uploaded_activity_file(upload, source)
+    if len(rows) != 1:
+        raise ValueError("Calibration upload must contain exactly one FIT activity.")
+    row = rows[0]
+    payload = raw_payload_dict(row)
+    if payload.get("format") != "fit":
+        raise ValueError("Calibration upload must be a FIT file.")
+    device_watts = payload_number(payload, "average_watts") or payload_number(payload, "session_average_watts")
+    if device_watts is None:
+        raise ValueError("Calibration FIT did not contain device watts.")
+    tested_on = date_part(row.get("started_on"))
+    duration_minutes = duration_seconds_to_minutes(row.get("duration_seconds"))
+    if duration_minutes is None:
+        duration_seconds = payload_number(payload, "sample_duration_seconds")
+        duration_minutes = duration_seconds / 60 if duration_seconds is not None else None
+    hr = row.get("hr") if row.get("hr") is not None else payload_number(payload, "average_source_hr")
+    mass_kg = mass_for_date(conn, tested_on) if tested_on is not None else None
+    title = row.get("title") or row.get("source_activity_id") or Path(upload.filename).stem
+    quality_flags = calibration_quality_flags(duration_minutes, payload, hr)
+    return {
+        "id": None,
+        "date": tested_on,
+        "title": title,
+        "duration_minutes": duration_minutes,
+        "device_watts": device_watts,
+        "cadence": payload_number(payload, "average_cadence"),
+        "hr": hr,
+        "mass_kg": mass_kg,
+        "notes": f"FIT calibration upload - {title}",
+        "source": source,
+        "source_activity_id": row.get("source_activity_id"),
+        "source_title": title,
+        "source_started_on": row.get("started_on"),
+        "source_file": Path(upload.filename).name,
+        "file_sha256": hashlib.sha256(upload.content).hexdigest(),
+        "raw_payload": row.get("raw_payload"),
+        "quality_flags": quality_flags,
+    }
+
+
+def calibration_quality_flags(
+    duration_minutes: float | None,
+    payload: dict[str, object],
+    hr: object,
+) -> str | None:
+    flags = []
+    if duration_minutes is None:
+        flags.append("Duration missing")
+    elif duration_minutes < 4.5:
+        flags.append("Shorter than 5 minute target")
+    elif duration_minutes > 6.5:
+        flags.append("Longer than 5 minute target")
+    cadence_variability = payload_number(payload, "cadence_variability_pct")
+    if cadence_variability is not None and cadence_variability > 10:
+        flags.append("Cadence varied by more than 10%")
+    if payload_number(payload, "average_cadence") is None:
+        flags.append("Average cadence missing")
+    if maybe_int(hr) is None:
+        flags.append("HR missing")
+    return "; ".join(flags) if flags else None
+
+
+def payload_number(payload: dict[str, object], key: str) -> float | None:
+    value = payload.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def resistance_counts(conn: sqlite3.Connection, table_name: str) -> dict[int, int]:
@@ -1305,7 +1489,7 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
     for item in items:
         rows.append([
             escape(str(item["category"])),
-            escape(str(item["date"])),
+            escape(fmt_date(item["date"])),
             escape(str(item["start"])),
             escape(str(item["area"])),
             escape(str(item["record"])),
@@ -1495,7 +1679,7 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], rea
 <tr>
   <td>{escape(str(row['source']))}</td>
   <td>{escape(str(row['title'] or ''))}</td>
-  <td>{escape(str(row['started_on'] or ''))}</td>
+  <td>{escape(fmt_datetime(row['started_on']))}</td>
   <td>{fmt_num(row['raw_distance'], 3)}<br><span class="muted">{source_metric_summary(row)}</span></td>
   <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
   <td>{duplicate_match_label(row)}</td>
@@ -1592,7 +1776,7 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
         <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
         <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
         <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
-        <label>Resistance<input name="resistance" type="number" min="1" max="12" value="{fmt_raw(resistance)}" required></label>
+        <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
         <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
         <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
         <label>Entry number<input name="entry_index" type="number" min="1"></label>
@@ -1614,8 +1798,12 @@ def default_promotion_notes(row: sqlite3.Row) -> str:
 def raw_payload_dict(row: sqlite3.Row) -> dict[str, object]:
     if not row["raw_payload"]:
         return {}
+    return payload_from_text(row["raw_payload"])
+
+
+def payload_from_text(raw_payload: object) -> dict[str, object]:
     try:
-        payload = json.loads(row["raw_payload"])
+        payload = json.loads(str(raw_payload))
     except (TypeError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -1663,11 +1851,25 @@ def source_metric_summary(row: sqlite3.Row) -> str:
 def resistance_factor_row(row: dict[str, object]) -> str:
     resistance = int(row["resistance"])
     scaling = row.get("scaling")
+    provenance = provenance_label(row.get("provenance"))
+    basis = row.get("basis") or ""
     return f"""
 <tr>
   <td>{resistance}</td>
   <td><input name="scaling_{resistance}" type="number" step="0.000001" min="0" value="{fmt_raw(scaling)}"></td>
+  <td>{escape(provenance)}</td>
+  <td>{escape(str(basis))}</td>
 </tr>"""
+
+
+def provenance_label(value: object) -> str:
+    text = str(value or "").strip().lower()
+    labels = {
+        "measured": "Measured",
+        "manual": "Manual",
+        "interpolated": "Interpolated",
+    }
+    return labels.get(text, "Needs factor" if not text else text.replace("_", " ").title())
 
 
 def mass_log_table(rows: list[sqlite3.Row]) -> str:
@@ -1687,18 +1889,75 @@ def mass_log_table(rows: list[sqlite3.Row]) -> str:
     return "".join(rendered)
 
 
+def calibration_protocol_panel() -> str:
+    return """
+<div class="muted" style="margin-bottom:12px;">
+  Warm up first, run a steady 5 minute effort at one resistance level, keep cadence stable, then upload the FIT file here so it is used for calibration rather than added to the workout review queue.
+</div>"""
+
+
+def fit_calibration_upload_form(current_mass_kg: float | None) -> str:
+    return f"""
+<form class="stack" method="post" action="/calibration/test/preview" enctype="multipart/form-data" style="margin-bottom:14px;">
+  <label>Source<input name="source" value="strava" required></label>
+  <label>Calibration FIT<input name="calibration_upload" type="file" accept=".fit,.fit.gz" required></label>
+  <label>Resistance<select name="resistance" required>{resistance_select_options(4)}</select></label>
+  <label>Average HR<input name="hr" type="number" min="0"></label>
+  <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(current_mass_kg)}"></label>
+  <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
+  <label>Notes<input name="notes"></label>
+  <button type="submit">Preview calibration file</button>
+</form>"""
+
+
+def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<div class="empty">No imported FIT activities match the 5 minute calibration protocol yet.</div>'
+    body = []
+    for row in rows:
+        quality = f'<br><span class="muted">{escape(str(row["quality_flags"]))}</span>' if row.get("quality_flags") else ""
+        body.append(f"""
+<tr>
+  <td>{escape(fmt_date(row["date"]))}<br><span class="muted">{escape(str(row["title"] or ""))}</span></td>
+  <td>{fmt_minutes(row["duration_minutes"])}</td>
+  <td>{fmt_num(row["device_watts"], 1)}</td>
+  <td>{fmt_num(row["cadence"], 1)}</td>
+  <td>{fmt_num(row["hr"], 0)}{quality}</td>
+  <td>
+    <form class="stack" method="post" action="/calibration/test/preview">
+      <input type="hidden" name="source_raw_activity_id" value="{row['id']}">
+      <label>Resistance<select name="resistance" required>{resistance_select_options()}</select></label>
+      <label>Average HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}"></label>
+      <label>Mass kg<input name="mass_kg" type="number" step="0.001" min="0" value="{fmt_raw(row['mass_kg'])}"></label>
+      <label>Expected watts<input name="expected_watts" type="number" step="0.001" min="0"></label>
+      <label>Notes<input name="notes" value="{escape(str(row['notes']))}"></label>
+      <button type="submit">Preview factor</button>
+    </form>
+  </td>
+</tr>""")
+    return f"""
+<div class="table-scroll">
+  <table>
+    <thead><tr><th>Activity</th><th>Time</th><th>Device watts</th><th>Cadence</th><th>HR</th><th>Calibration input</th></tr></thead>
+    <tbody>{''.join(body)}</tbody>
+  </table>
+</div>"""
+
+
 def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
     return table(
-        ["Date", "Resistance", "Device watts", "Expected watts", "HR", "Mass", "Scaling", "Notes"],
+        ["Date", "Resistance", "Device watts", "Expected watts", "HR", "Mass", "Scaling", "Source", "Quality", "Notes"],
         [
             [
-                row["tested_on"],
+                fmt_date(row["tested_on"]),
                 row["resistance"],
                 fmt_num(row["device_watts"], 1),
                 fmt_num(row["expected_watts"], 1),
                 row["hr"],
                 fmt_num(row["mass_kg"], 2),
                 fmt_num(row["calculated_scaling"], 4),
+                calibration_test_source_label(row),
+                row["quality_flags"],
                 row["notes"],
             ]
             for row in rows
@@ -1706,11 +1965,25 @@ def calibration_tests_table(rows: list[sqlite3.Row]) -> str:
     )
 
 
+def calibration_test_source_label(row: sqlite3.Row) -> str:
+    if row["source_title"]:
+        return str(row["source_title"])
+    if row["source_file"]:
+        return str(row["source_file"])
+    if row["source_activity_id"]:
+        return str(row["source_activity_id"])
+    return str(row["source"] or "")
+
+
 def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     if preview is None:
         return ""
     current = preview.get("current_scaling")
     change = preview.get("change_pct")
+    source = calibration_preview_source(preview)
+    quality = calibration_preview_quality(preview)
+    expected_note = calibration_expected_watts_note(preview)
+    current_source = provenance_label(preview.get("current_provenance")) if preview.get("current_provenance") else "None"
     return f"""
 <div class="band" style="margin-top:14px;">
   <h2>Preview Factor</h2>
@@ -1718,15 +1991,50 @@ def calibration_preview_panel(preview: dict[str, object] | None) -> str:
     {metric("Resistance", preview["resistance"], "blue")}
     {metric("Device watts", fmt_num(preview["device_watts"], 1), "amber")}
     {metric("Expected watts", fmt_num(preview["expected_watts"], 1), "green")}
-    {metric("Calculated factor", fmt_num(preview["calculated_scaling"], 4), "green")}
+    {metric("Calculated performance factor", fmt_num(preview["calculated_scaling"], 4), "green")}
     {metric("Current factor", fmt_num(current, 4) if current is not None else "None", "blue")}
+    {metric("Current source", current_source, "blue")}
     {metric("Change", signed_percent(change), "amber")}
   </div>
+  {expected_note}
+  {source}
+  {quality}
   <form method="post" action="/calibration/test/apply" style="margin-top:14px;">
     {hidden_calibration_inputs(preview)}
     <button type="submit">Apply factor</button>
   </form>
 </div>"""
+
+
+def calibration_expected_watts_note(preview: dict[str, object]) -> str:
+    if preview.get("expected_watts_source") != "HR/MET x mechanical efficiency":
+        return ""
+    return (
+        '<div class="muted" style="margin-top:12px;">'
+        f'Expected watts: {fmt_num(preview.get("metabolic_watts"), 1)} metabolic W '
+        f'x {fmt_percent(preview.get("mechanical_efficiency"))} mechanical efficiency.'
+        "</div>"
+    )
+
+
+def calibration_preview_source(preview: dict[str, object]) -> str:
+    pieces = []
+    if preview.get("source"):
+        pieces.append(str(preview["source"]))
+    if preview.get("source_title"):
+        pieces.append(str(preview["source_title"]))
+    if preview.get("source_file"):
+        pieces.append(str(preview["source_file"]))
+    if not pieces:
+        return ""
+    return f'<div class="muted" style="margin-top:12px;">Source: {escape(" - ".join(pieces))}</div>'
+
+
+def calibration_preview_quality(preview: dict[str, object]) -> str:
+    flags = preview.get("quality_flags")
+    if not flags:
+        return ""
+    return f'<div class="empty" style="margin-top:12px;">Calibration check: {escape(str(flags))}</div>'
 
 
 def circuit_progress_table(rows: list[dict[str, object]]) -> str:
@@ -1741,8 +2049,8 @@ def circuit_progress_table(rows: list[dict[str, object]]) -> str:
                 fmt_minutes(row["best_time"]),
                 fmt_minutes(row["average_time"]),
                 signed_minutes(row["change_minutes"]),
-                row["best_date"],
-                row["latest_date"],
+                fmt_date(row["best_date"]),
+                fmt_date(row["latest_date"]),
             ]
             for row in rows
         ],
@@ -1764,7 +2072,7 @@ def source_highlights_table(rows: list[dict[str, object]]) -> str:
         highlights.append([
             label,
             fmt_num(row.get(key), digits),
-            row.get("started_on", ""),
+            fmt_datetime(row.get("started_on", "")),
             row.get("session_type", ""),
             row.get("circuit", ""),
             row.get("resistance", ""),
@@ -1777,7 +2085,7 @@ def strength_signals_table(rows: list[dict[str, object]]) -> str:
         ["Date", "Start", "Type", "Session", "Resistance", "RPM", "Est watts", "HR", "Time", "Calories"],
         [
             [
-                row["date"],
+                fmt_date(row["date"]),
                 row["start"],
                 row["type"],
                 row["label"],
@@ -1795,20 +2103,26 @@ def strength_signals_table(rows: list[dict[str, object]]) -> str:
 
 def calibration_coverage_table(rows: list[dict[str, object]]) -> str:
     return table(
-        ["Resistance", "Status", "Scaling", "Sprint sessions", "Lap sessions", "Tests", "Last tested"],
+        ["Resistance", "Status", "Performance factor", "Sprint sessions", "Lap sessions", "Tests", "Last tested"],
         [
             [
                 row["resistance"],
-                "Calibrated" if row["scaling"] is not None else "Needs factor",
+                resistance_factor_status(row),
                 fmt_num(row["scaling"], 4),
                 row["sprint_sessions"],
                 row["lap_sessions"],
                 row["calibration_tests"],
-                row["last_tested"],
+                fmt_date(row["last_tested"]),
             ]
             for row in rows
         ],
     )
+
+
+def resistance_factor_status(row: dict[str, object]) -> str:
+    if row.get("scaling") is None:
+        return "Needs factor"
+    return provenance_label(row.get("provenance"))
 
 
 def daily_table(rows: list[dict[str, object]]) -> str:
@@ -1816,7 +2130,7 @@ def daily_table(rows: list[dict[str, object]]) -> str:
         ["Date", "Sprints", "Laps", "Calories (HR/MET)", "Time", "Avg watts", "Avg RPM", "Lap distance", "Total distance"],
         [
             [
-                row["date"],
+                fmt_date(row["date"]),
                 row["sprint_count"],
                 row["lap_count"],
                 fmt_num(row["total_calories"], 1),
@@ -1831,6 +2145,28 @@ def daily_table(rows: list[dict[str, object]]) -> str:
     )
 
 
+def weekly_distance_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Week", "Date range", "Workout days", "Distance km", "Distance miles"],
+        [
+            [
+                f"{row['iso_year']}-W{int(row['iso_week']):02d}",
+                f"{fmt_date(row['week_start'])} to {fmt_date(row['week_end'])}",
+                row["workout_days"],
+                fmt_num(row["distance_km"], 2),
+                fmt_num(row["distance_miles"], 2),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def distance_km_miles(row: dict[str, object] | None) -> str:
+    if row is None:
+        return ""
+    return f"{fmt_num(row.get('distance_km'), 2)} km / {fmt_num(row.get('distance_miles'), 2)} mi"
+
+
 def best_laps_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Circuit", "Best time", "Date", "Length", "Average speed"],
@@ -1838,7 +2174,7 @@ def best_laps_table(rows: list[dict[str, object]]) -> str:
             [
                 row["circuit_name"],
                 fmt_minutes(row["lap_time_minutes"]),
-                row["performed_on"],
+                fmt_date(row["performed_on"]),
                 fmt_num(row["length"], 3),
                 fmt_num(row["average_speed"], 2),
             ]
@@ -1852,7 +2188,7 @@ def source_metrics_table(rows: list[dict[str, object]]) -> str:
         ["Start", "Type", "Circuit", "Resistance", "Avg est watts", "Best 5m", "Best 60s", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
         [
             [
-                row["started_on"],
+                fmt_datetime(row["started_on"]),
                 row["session_type"],
                 row["circuit"],
                 row["resistance"],
@@ -2066,10 +2402,9 @@ def chart_axis_label(value: float, unit: str = "") -> str:
 
 def chart_edge_label(label: object) -> str:
     text = str(label)
-    if "T" in text:
-        return text.split("T", 1)[0]
-    if " " in text:
-        return text.split(" ", 1)[0]
+    parsed = parse_datetime(text)
+    if parsed is not None:
+        return fmt_date(parsed.date().isoformat())
     return text[:16]
 
 
@@ -2635,8 +2970,8 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     resistance = maybe_int(params.get("resistance"))
     if resistance is None:
         resistance = 4
-    if resistance < 1 or resistance > 12:
-        raise ValueError("Resistance must be between 1 and 12.")
+    if not is_valid_resistance(resistance):
+        raise ValueError(resistance_error_message())
     rpm = maybe_float(params.get("rpm"))
     if rpm is None:
         rpm = maybe_float(str(payload.get("average_cadence"))) if payload.get("average_cadence") is not None else None
@@ -2931,9 +3266,26 @@ def dismiss_duplicate_pair(conn: sqlite3.Connection, params: dict[str, FormValue
 
 def validated_resistance(value: str | None) -> int | None:
     resistance = maybe_int(value)
-    if resistance is not None and not 1 <= resistance <= 12:
-        raise ValueError("Resistance must be between 1 and 12.")
+    if resistance is not None and not is_valid_resistance(resistance):
+        raise ValueError(resistance_error_message())
     return resistance
+
+
+def is_valid_resistance(resistance: int) -> bool:
+    return MIN_RESISTANCE <= resistance <= MAX_RESISTANCE
+
+
+def resistance_error_message() -> str:
+    return f"Resistance must be between {MIN_RESISTANCE} and {MAX_RESISTANCE}."
+
+
+def mechanical_efficiency_value(value: str | None) -> float:
+    efficiency = maybe_float(value)
+    if efficiency is None:
+        efficiency = 0.22
+    if not 0 < efficiency <= 1:
+        raise ValueError("Mechanical efficiency must be between 0 and 1.")
+    return efficiency
 
 
 def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
@@ -2943,8 +3295,8 @@ def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
     if profile is None:
         conn.execute(
             """
-            INSERT INTO calibration_profiles (name, length_scale, distance_per_stroke, active)
-            VALUES ('Default under-desk bike', 0.45, NULL, 1)
+            INSERT INTO calibration_profiles (name, length_scale, distance_per_stroke, mechanical_efficiency, active)
+            VALUES ('Default under-desk bike', 0.45, NULL, 0.22, 1)
             """
         )
         conn.commit()
@@ -2957,13 +3309,14 @@ def update_calibration_profile(conn: sqlite3.Connection, params: dict[str, str])
     conn.execute(
         """
         UPDATE calibration_profiles
-        SET name = ?, length_scale = ?, distance_per_stroke = ?, active = 1
+        SET name = ?, length_scale = ?, distance_per_stroke = ?, mechanical_efficiency = ?, active = 1
         WHERE id = ?
         """,
         (
             required(params, "name"),
             float(required(params, "length_scale")),
             maybe_float(params.get("distance_per_stroke")),
+            mechanical_efficiency_value(params.get("mechanical_efficiency")),
             profile_id,
         ),
     )
@@ -2971,80 +3324,226 @@ def update_calibration_profile(conn: sqlite3.Connection, params: dict[str, str])
 
 
 def resistance_scaling_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    refresh_interpolated_resistance_scaling(conn)
     existing = {
-        int(row["resistance"]): row["scaling"]
-        for row in conn.execute("SELECT resistance, scaling FROM resistance_scaling").fetchall()
+        int(row["resistance"]): {
+            "scaling": row["scaling"],
+            "provenance": row["provenance"] or "manual",
+        }
+        for row in conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling").fetchall()
     }
-    return [{"resistance": resistance, "scaling": existing.get(resistance)} for resistance in range(1, 13)]
+    anchors = resistance_scaling_anchors(conn)
+    rows = []
+    for resistance in resistance_values():
+        existing_row = existing.get(resistance, {})
+        rows.append({
+            "resistance": resistance,
+            "scaling": existing_row.get("scaling"),
+            "provenance": existing_row.get("provenance"),
+            "basis": interpolation_basis_label(anchors, resistance, existing_row.get("provenance")),
+        })
+    return rows
 
 
 def update_resistance_scaling(conn: sqlite3.Connection, params: dict[str, str]) -> None:
-    for resistance in range(1, 13):
+    existing = {
+        int(row["resistance"]): row
+        for row in conn.execute("SELECT resistance, scaling, provenance FROM resistance_scaling").fetchall()
+    }
+    for resistance in resistance_values():
         scaling = maybe_float(params.get(f"scaling_{resistance}"))
         if scaling is None:
             continue
+        existing_row = existing.get(resistance)
+        if existing_row is not None and same_float(existing_row["scaling"], scaling):
+            continue
         conn.execute(
             """
-            INSERT INTO resistance_scaling (resistance, scaling)
-            VALUES (?, ?)
-            ON CONFLICT(resistance) DO UPDATE SET scaling = excluded.scaling
+            INSERT INTO resistance_scaling (resistance, scaling, provenance)
+            VALUES (?, ?, 'manual')
+            ON CONFLICT(resistance) DO UPDATE SET
+                scaling = excluded.scaling,
+                provenance = excluded.provenance
+            """,
+            (resistance, scaling),
+        )
+    refresh_interpolated_resistance_scaling(conn)
+    conn.commit()
+
+
+def refresh_interpolated_resistance_scaling(conn: sqlite3.Connection) -> None:
+    anchors = resistance_scaling_anchors(conn)
+    desired: dict[int, float] = {}
+    for (lower_resistance, lower_scaling), (upper_resistance, upper_scaling) in zip(anchors, anchors[1:]):
+        if upper_resistance - lower_resistance <= 1:
+            continue
+        for resistance in resistance_values():
+            if not lower_resistance < resistance < upper_resistance:
+                continue
+            progress = (resistance - lower_resistance) / (upper_resistance - lower_resistance)
+            desired[resistance] = lower_scaling + ((upper_scaling - lower_scaling) * progress)
+
+    existing = {
+        int(row["resistance"]): float(row["scaling"])
+        for row in conn.execute(
+            "SELECT resistance, scaling FROM resistance_scaling WHERE provenance = 'interpolated'"
+        ).fetchall()
+    }
+    if existing.keys() == desired.keys() and all(same_float(existing[key], desired[key]) for key in desired):
+        return
+
+    conn.execute("DELETE FROM resistance_scaling WHERE provenance = 'interpolated'")
+    for resistance, scaling in desired.items():
+        conn.execute(
+            """
+            INSERT INTO resistance_scaling (resistance, scaling, provenance)
+            VALUES (?, ?, 'interpolated')
+            ON CONFLICT(resistance) DO NOTHING
             """,
             (resistance, scaling),
         )
     conn.commit()
 
 
-def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, str]) -> dict[str, object]:
-    tested_on = required(params, "tested_on")
-    resistance = maybe_int(params.get("resistance"))
+def resistance_scaling_anchors(conn: sqlite3.Connection) -> list[tuple[int, float]]:
+    rows = conn.execute(
+        """
+        SELECT resistance, scaling
+        FROM resistance_scaling
+        WHERE COALESCE(provenance, 'manual') != 'interpolated'
+        ORDER BY resistance
+        """
+    ).fetchall()
+    return [(int(row["resistance"]), float(row["scaling"])) for row in rows]
+
+
+def interpolation_basis_label(anchors: list[tuple[int, float]], resistance: int, provenance: object) -> str:
+    if provenance != "interpolated":
+        return ""
+    lower: int | None = None
+    upper: int | None = None
+    for anchor_resistance, _scaling in anchors:
+        if anchor_resistance < resistance:
+            lower = anchor_resistance
+        elif anchor_resistance > resistance and upper is None:
+            upper = anchor_resistance
+    if lower is None or upper is None:
+        return ""
+    return f"{lower}-{upper}"
+
+
+def same_float(left: object, right: object, tolerance: float = 0.0000005) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except (TypeError, ValueError):
+        return False
+
+
+def calculate_resistance_calibration_preview(conn: sqlite3.Connection, params: dict[str, FormValue]) -> dict[str, object]:
+    source_id = maybe_int(params.get("source_raw_activity_id"))
+    source_defaults = uploaded_fit_calibration_source_defaults(conn, params)
+    if source_defaults is None and source_id is not None:
+        source_defaults = fit_calibration_source_defaults(conn, source_id)
+    if source_id is not None and source_defaults is None:
+        raise ValueError("FIT calibration source was not found or does not contain device watts.")
+
+    tested_on = empty_to_none(params.get("tested_on")) or (source_defaults or {}).get("date")
+    if tested_on is None:
+        raise ValueError("Date is required.")
+    resistance = validated_resistance(params.get("resistance"))
     if resistance is None:
         raise ValueError("Resistance is required.")
     device_watts = maybe_float(params.get("device_watts"))
+    if device_watts is None and source_defaults is not None:
+        device_watts = maybe_float(str(source_defaults["device_watts"]))
     if device_watts is None or device_watts <= 0:
         raise ValueError("Device watts must be greater than zero.")
 
     mass_kg = maybe_float(params.get("mass_kg"))
+    if mass_kg is None and source_defaults is not None:
+        mass_kg = maybe_float(source_defaults.get("mass_kg"))
     hr = maybe_int(params.get("hr"))
+    if hr is None and source_defaults is not None:
+        hr = maybe_int(source_defaults.get("hr"))
+    profile = editable_calibration_profile(conn)
+    mechanical_efficiency = mechanical_efficiency_value(params.get("mechanical_efficiency") or profile["mechanical_efficiency"])
+    metabolic_watts = None
+    expected_watts_source = "manual"
     expected_watts = maybe_float(params.get("expected_watts"))
     if expected_watts is None:
-        expected_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+        metabolic_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+        expected_watts = estimated_mechanical_watts_from_hr(conn, hr, mass_kg, mechanical_efficiency)
+        expected_watts_source = "HR/MET x mechanical efficiency"
     if expected_watts is None or expected_watts <= 0:
         raise ValueError("Expected watts, or HR and mass kg, are required.")
 
     calculated_scaling = expected_watts / device_watts
     current = conn.execute(
-        "SELECT scaling FROM resistance_scaling WHERE resistance = ?",
+        "SELECT scaling, provenance FROM resistance_scaling WHERE resistance = ?",
         (resistance,),
     ).fetchone()
-    current_scaling = float(current["scaling"]) if current else None
+    current_scaling = resistance_scale(conn, resistance)
+    current_provenance = current["provenance"] if current else ("interpolated" if current_scaling is not None else None)
     change_pct = None
     if current_scaling:
         change_pct = (calculated_scaling - current_scaling) / current_scaling
 
+    duration_minutes = maybe_float(params.get("duration_minutes"))
+    if duration_minutes is None and source_defaults is not None:
+        duration_minutes = maybe_float(source_defaults.get("duration_minutes"))
+
+    source = empty_to_none(params.get("source")) or (source_defaults or {}).get("source")
+    source_activity_id = empty_to_none(params.get("source_activity_id")) or (source_defaults or {}).get("source_activity_id")
+    source_title = empty_to_none(params.get("source_title")) or (source_defaults or {}).get("source_title")
+    source_started_on = empty_to_none(params.get("source_started_on")) or (source_defaults or {}).get("source_started_on")
+    source_file = empty_to_none(params.get("source_file")) or (source_defaults or {}).get("source_file")
+    file_sha256 = empty_to_none(params.get("file_sha256")) or (source_defaults or {}).get("file_sha256")
+    raw_payload = empty_to_none(params.get("raw_payload")) or (source_defaults or {}).get("raw_payload")
+    quality_flags = empty_to_none(params.get("quality_flags")) or (source_defaults or {}).get("quality_flags")
+    if raw_payload and empty_to_none(params.get("quality_flags")) is None:
+        payload = payload_from_text(raw_payload)
+        if payload.get("format") == "fit":
+            quality_flags = calibration_quality_flags(duration_minutes, payload, hr)
+
     return {
         "tested_on": tested_on,
         "resistance": resistance,
-        "duration_minutes": maybe_float(params.get("duration_minutes")),
+        "duration_minutes": duration_minutes,
         "device_watts": device_watts,
         "expected_watts": expected_watts,
+        "expected_watts_source": expected_watts_source,
+        "metabolic_watts": metabolic_watts,
+        "mechanical_efficiency": mechanical_efficiency,
         "hr": hr,
         "mass_kg": mass_kg,
         "calculated_scaling": calculated_scaling,
         "current_scaling": current_scaling,
+        "current_provenance": current_provenance,
         "change_pct": change_pct,
-        "notes": empty_to_none(params.get("notes")),
+        "notes": empty_to_none(params.get("notes")) or (source_defaults or {}).get("notes"),
+        "source_raw_activity_id": source_id,
+        "source": source,
+        "source_activity_id": source_activity_id,
+        "source_title": source_title,
+        "source_started_on": source_started_on,
+        "source_file": source_file,
+        "file_sha256": file_sha256,
+        "raw_payload": raw_payload,
+        "quality_flags": quality_flags,
     }
 
 
-def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, str]) -> None:
+def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
     preview = calculate_resistance_calibration_preview(conn, params)
     conn.execute(
         """
         INSERT INTO resistance_calibration_tests (
             tested_on, resistance, duration_minutes, device_watts,
-            expected_watts, hr, mass_kg, calculated_scaling, notes
+            expected_watts, hr, mass_kg, calculated_scaling, notes,
+            source, source_activity_id, source_title, source_started_on,
+            source_file, file_sha256, raw_payload, quality_flags
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             preview["tested_on"],
@@ -3056,16 +3555,27 @@ def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, 
             preview["mass_kg"],
             preview["calculated_scaling"],
             preview["notes"],
+            preview["source"],
+            preview["source_activity_id"],
+            preview["source_title"],
+            preview["source_started_on"],
+            preview["source_file"],
+            preview["file_sha256"],
+            preview["raw_payload"],
+            preview["quality_flags"],
         ),
     )
     conn.execute(
         """
-        INSERT INTO resistance_scaling (resistance, scaling)
-        VALUES (?, ?)
-        ON CONFLICT(resistance) DO UPDATE SET scaling = excluded.scaling
+        INSERT INTO resistance_scaling (resistance, scaling, provenance)
+        VALUES (?, ?, 'measured')
+        ON CONFLICT(resistance) DO UPDATE SET
+            scaling = excluded.scaling,
+            provenance = excluded.provenance
         """,
         (preview["resistance"], preview["calculated_scaling"]),
     )
+    refresh_interpolated_resistance_scaling(conn)
     conn.commit()
 
 
@@ -3079,6 +3589,18 @@ def add_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
         (required(params, "measured_on"), float(required(params, "mass_kg"))),
     )
     conn.commit()
+
+
+def latest_mass_kg(conn: sqlite3.Connection) -> float | None:
+    row = conn.execute(
+        """
+        SELECT mass_kg
+        FROM mass_log
+        ORDER BY measured_on DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return float(row["mass_kg"]) if row else None
 
 
 def update_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -3133,8 +3655,12 @@ def circuit_goal_script() -> str:
 def resistance_select_options(selected: int | None = None) -> str:
     return "".join(
         f'<option value="{resistance}"{" selected" if selected == resistance else ""}>{resistance}</option>'
-        for resistance in range(1, 13)
+        for resistance in resistance_values()
     )
+
+
+def resistance_values() -> range:
+    return range(MIN_RESISTANCE, MAX_RESISTANCE + 1)
 
 
 def hidden_calibration_inputs(preview: dict[str, object]) -> str:
@@ -3147,6 +3673,14 @@ def hidden_calibration_inputs(preview: dict[str, object]) -> str:
         "hr",
         "mass_kg",
         "notes",
+        "source",
+        "source_activity_id",
+        "source_title",
+        "source_started_on",
+        "source_file",
+        "file_sha256",
+        "raw_payload",
+        "quality_flags",
     ]
     inputs = []
     for field in fields:
@@ -3217,6 +3751,12 @@ def signed_percent(value: object) -> str:
     return f"{float(value):+,.1%}"
 
 
+def fmt_percent(value: object) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.1%}"
+
+
 def fmt_minutes(value: object) -> str:
     if value is None or value == "":
         return ""
@@ -3232,6 +3772,30 @@ def duration_seconds_to_minutes(value: object) -> float | None:
     if value is None or value == "":
         return None
     return float(value) / 60
+
+
+def fmt_date(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    parsed = parse_datetime(text)
+    if parsed is not None:
+        return parsed.strftime("%d-%m-%Y")
+    if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        return f"{text[8:10]}-{text[5:7]}-{text[0:4]}"
+    return text
+
+
+def fmt_datetime(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    parsed = parse_datetime(text)
+    if parsed is None:
+        return fmt_date(text)
+    if has_time_component(text):
+        return parsed.strftime("%d-%m-%Y %H:%M")
+    return parsed.strftime("%d-%m-%Y")
 
 
 def fmt_start_time(value: object) -> str:

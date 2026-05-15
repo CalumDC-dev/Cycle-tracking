@@ -53,6 +53,26 @@ class DatabaseMigrationTests(unittest.TestCase):
                 raw_activity_id INTEGER,
                 notes TEXT
             );
+            CREATE TABLE resistance_calibration_tests (
+                id INTEGER PRIMARY KEY,
+                tested_on TEXT NOT NULL,
+                resistance INTEGER NOT NULL,
+                duration_minutes REAL,
+                device_watts REAL NOT NULL,
+                expected_watts REAL NOT NULL,
+                hr INTEGER,
+                mass_kg REAL,
+                calculated_scaling REAL NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE resistance_scaling (
+                id INTEGER PRIMARY KEY,
+                resistance INTEGER NOT NULL UNIQUE,
+                scaling REAL NOT NULL
+            );
+            INSERT INTO resistance_scaling (resistance, scaling)
+            VALUES (4, 0.15);
             """
         )
 
@@ -61,13 +81,24 @@ class DatabaseMigrationTests(unittest.TestCase):
         raw_columns = self._columns(conn, "raw_activities")
         sprint_columns = self._columns(conn, "sprint_entries")
         lap_columns = self._columns(conn, "lap_entries")
+        calibration_columns = self._columns(conn, "resistance_calibration_tests")
+        resistance_columns = self._columns(conn, "resistance_scaling")
         self.assertIn("hr", raw_columns)
         self.assertIn("duplicate_entry_type", raw_columns)
         self.assertIn("duplicate_entry_id", raw_columns)
         self.assertIn("duplicate_confidence", raw_columns)
         self.assertIn("duplicate_reason", raw_columns)
+        self.assertIn("mechanical_efficiency", self._columns(conn, "calibration_profiles"))
         self.assertIn("started_at", sprint_columns)
         self.assertIn("started_at", lap_columns)
+        self.assertIn("source_activity_id", calibration_columns)
+        self.assertIn("source_file", calibration_columns)
+        self.assertIn("file_sha256", calibration_columns)
+        self.assertIn("raw_payload", calibration_columns)
+        self.assertIn("quality_flags", calibration_columns)
+        self.assertIn("provenance", resistance_columns)
+        provenance = conn.execute("SELECT provenance FROM resistance_scaling WHERE resistance = 4").fetchone()[0]
+        self.assertEqual(provenance, "manual")
         self.assertTrue(self._table_exists(conn, "duplicate_dismissals"))
         conn.close()
 

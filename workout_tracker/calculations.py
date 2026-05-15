@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 import sqlite3
 from typing import Any
+
+
+KM_TO_MILES = 0.621371192237334
 
 
 @dataclass(frozen=True)
@@ -67,11 +71,47 @@ def device_distance_for_length(length: float | None, length_scale: float | None)
 def resistance_scale(conn: sqlite3.Connection, resistance: int | None) -> float | None:
     if resistance is None:
         return None
-    row = conn.execute(
-        "SELECT scaling FROM resistance_scaling WHERE resistance = ?",
-        (resistance,),
-    ).fetchone()
-    return float(row["scaling"]) if row else None
+    resistance = int(resistance)
+    rows = conn.execute(
+        """
+        SELECT resistance, scaling, COALESCE(provenance, 'manual') AS provenance
+        FROM resistance_scaling
+        WHERE scaling IS NOT NULL
+        ORDER BY resistance
+        """
+    ).fetchall()
+    exact = next((row for row in rows if int(row["resistance"]) == resistance), None)
+    if exact is not None and str(exact["provenance"]) != "interpolated":
+        return float(exact["scaling"])
+    interpolated = interpolated_resistance_scale(rows, resistance)
+    if interpolated is not None:
+        return interpolated
+    return float(exact["scaling"]) if exact is not None else None
+
+
+def interpolated_resistance_scale(rows: list[sqlite3.Row], resistance: int) -> float | None:
+    anchors = [
+        (int(row["resistance"]), float(row["scaling"]))
+        for row in rows
+        if str(row["provenance"] or "manual") != "interpolated"
+    ]
+    lower: tuple[int, float] | None = None
+    upper: tuple[int, float] | None = None
+    for anchor_resistance, anchor_scaling in anchors:
+        if anchor_resistance == resistance:
+            return anchor_scaling
+        if anchor_resistance < resistance:
+            lower = (anchor_resistance, anchor_scaling)
+        elif anchor_resistance > resistance and upper is None:
+            upper = (anchor_resistance, anchor_scaling)
+    if lower is None or upper is None:
+        return None
+    lower_resistance, lower_scaling = lower
+    upper_resistance, upper_scaling = upper
+    if upper_resistance == lower_resistance:
+        return lower_scaling
+    progress = (resistance - lower_resistance) / (upper_resistance - lower_resistance)
+    return lower_scaling + ((upper_scaling - lower_scaling) * progress)
 
 
 def met_for_hr(conn: sqlite3.Connection, hr: int | None) -> float | None:
@@ -95,6 +135,18 @@ def estimated_watts_from_hr(conn: sqlite3.Connection, hr: int | None, mass_kg: f
         return None
     # MET calories are kcal/hour. Convert kcal/hour to watts.
     return met * mass_kg * 4184 / 3600
+
+
+def estimated_mechanical_watts_from_hr(
+    conn: sqlite3.Connection,
+    hr: int | None,
+    mass_kg: float | None,
+    mechanical_efficiency: float | None,
+) -> float | None:
+    metabolic_watts = estimated_watts_from_hr(conn, hr, mass_kg)
+    if metabolic_watts is None or mechanical_efficiency is None:
+        return None
+    return metabolic_watts * mechanical_efficiency
 
 
 def mass_for_date(conn: sqlite3.Connection, performed_on: str) -> float | None:
@@ -291,8 +343,47 @@ def daily_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return summaries
 
 
+def weekly_distance_summary(daily_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    weeks: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in daily_rows:
+        performed_on = _date_from_text(row.get("date"))
+        if performed_on is None:
+            continue
+        iso = performed_on.isocalendar()
+        key = (iso.year, iso.week)
+        week_start = performed_on - timedelta(days=performed_on.weekday())
+        week = weeks.setdefault(
+            key,
+            {
+                "iso_year": iso.year,
+                "iso_week": iso.week,
+                "week_start": week_start.isoformat(),
+                "week_end": (week_start + timedelta(days=6)).isoformat(),
+                "workout_days": 0,
+                "distance_km": 0.0,
+                "distance_miles": 0.0,
+            },
+        )
+        week["workout_days"] += 1
+        week["distance_km"] += float(row.get("total_distance") or 0)
+
+    for week in weeks.values():
+        week["distance_miles"] = week["distance_km"] * KM_TO_MILES
+    return sorted(weeks.values(), key=lambda row: row["week_start"], reverse=True)
+
+
+def _date_from_text(value: object) -> date | None:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except ValueError:
+        return None
+
+
 def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
     summary = daily_summary(conn)
+    weekly_distance = weekly_distance_summary(summary)
     sprints = calculated_sprints(conn)
     laps = calculated_laps(conn)
     mass_rows = conn.execute("SELECT measured_on, mass_kg FROM mass_log ORDER BY measured_on").fetchall()
@@ -319,6 +410,7 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
         "best_laps_by_circuit": best_laps_by_circuit(laps),
         "mass_change": mass_change,
         "daily": summary,
+        "weekly_distance": weekly_distance,
         "mass": [dict(row) for row in mass_rows],
     }
 

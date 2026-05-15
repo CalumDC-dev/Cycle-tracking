@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS calibration_profiles (
     name TEXT NOT NULL UNIQUE,
     length_scale REAL NOT NULL,
     distance_per_stroke REAL,
+    mechanical_efficiency REAL NOT NULL DEFAULT 0.22,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS calibration_profiles (
 CREATE TABLE IF NOT EXISTS resistance_scaling (
     id INTEGER PRIMARY KEY,
     resistance INTEGER NOT NULL UNIQUE,
-    scaling REAL NOT NULL
+    scaling REAL NOT NULL,
+    provenance TEXT NOT NULL DEFAULT 'manual'
 );
 
 CREATE TABLE IF NOT EXISTS resistance_calibration_tests (
@@ -37,6 +39,14 @@ CREATE TABLE IF NOT EXISTS resistance_calibration_tests (
     mass_kg REAL,
     calculated_scaling REAL NOT NULL,
     notes TEXT,
+    source TEXT,
+    source_activity_id TEXT,
+    source_title TEXT,
+    source_started_on TEXT,
+    source_file TEXT,
+    file_sha256 TEXT,
+    raw_payload TEXT,
+    quality_flags TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -176,6 +186,7 @@ def reset_db(conn: sqlite3.Connection) -> None:
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
+    _ensure_column(conn, "calibration_profiles", "mechanical_efficiency", "REAL NOT NULL DEFAULT 0.22")
     _ensure_column(conn, "sprint_entries", "started_at", "TEXT")
     _ensure_column(conn, "lap_entries", "started_at", "TEXT")
     _ensure_column(conn, "raw_activities", "hr", "INTEGER")
@@ -183,6 +194,15 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "raw_activities", "duplicate_entry_id", "INTEGER")
     _ensure_column(conn, "raw_activities", "duplicate_confidence", "REAL")
     _ensure_column(conn, "raw_activities", "duplicate_reason", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_activity_id", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_title", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_started_on", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "source_file", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "file_sha256", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "raw_payload", "TEXT")
+    _ensure_column(conn, "resistance_calibration_tests", "quality_flags", "TEXT")
+    _ensure_column(conn, "resistance_scaling", "provenance", "TEXT NOT NULL DEFAULT 'manual'")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

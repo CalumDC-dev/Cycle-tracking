@@ -126,6 +126,47 @@ class ActivityImportTests(unittest.TestCase):
         self.assertIn('"max_speed_mps"', rows[0]["raw_payload"])
         self.assertIn('"trackpoint_count": 2', rows[0]["raw_payload"])
 
+    def test_load_activity_tcx_trims_trailing_inactive_samples(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "Calibration.tcx"
+            path.write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
+  xmlns:ns3="http://www.garmin.com/xmlschemas/ActivityExtension/v2">
+  <Activities>
+    <Activity Sport="Biking">
+      <Id>2026-05-12T08:00:00Z</Id>
+      <Lap StartTime="2026-05-12T08:00:00Z">
+        <TotalTimeSeconds>420</TotalTimeSeconds>
+        <DistanceMeters>5000</DistanceMeters>
+        <Track>
+          <Trackpoint><Time>2026-05-12T08:00:00Z</Time><Cadence>80</Cadence><HeartRateBpm><Value>120</Value></HeartRateBpm><Extensions><ns3:TPX><ns3:Speed>5</ns3:Speed><ns3:Watts>200</ns3:Watts></ns3:TPX></Extensions></Trackpoint>
+          <Trackpoint><Time>2026-05-12T08:01:00Z</Time><Cadence>82</Cadence><HeartRateBpm><Value>122</Value></HeartRateBpm><Extensions><ns3:TPX><ns3:Speed>5.1</ns3:Speed><ns3:Watts>210</ns3:Watts></ns3:TPX></Extensions></Trackpoint>
+          <Trackpoint><Time>2026-05-12T08:05:00Z</Time><Cadence>83</Cadence><HeartRateBpm><Value>123</Value></HeartRateBpm><Extensions><ns3:TPX><ns3:Speed>5.2</ns3:Speed><ns3:Watts>215</ns3:Watts></ns3:TPX></Extensions></Trackpoint>
+          <Trackpoint><Time>2026-05-12T08:05:01Z</Time><Cadence>0</Cadence><HeartRateBpm><Value>118</Value></HeartRateBpm><Extensions><ns3:TPX><ns3:Speed>0</ns3:Speed><ns3:Watts>0</ns3:Watts></ns3:TPX></Extensions></Trackpoint>
+          <Trackpoint><Time>2026-05-12T08:07:00Z</Time><Cadence>0</Cadence><HeartRateBpm><Value>112</Value></HeartRateBpm><Extensions><ns3:TPX><ns3:Speed>0</ns3:Speed><ns3:Watts>0</ns3:Watts></ns3:TPX></Extensions></Trackpoint>
+        </Track>
+      </Lap>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>
+""",
+                encoding="utf-8",
+            )
+
+            rows = load_activity_file(path, "strava")
+
+        self.assertEqual(rows[0]["duration_seconds"], "301")
+        self.assertEqual(rows[0]["hr"], "121.667")
+        payload = json.loads(rows[0]["raw_payload"])
+        self.assertEqual(payload["trackpoint_count"], 5)
+        self.assertEqual(payload["sample_count"], 3)
+        self.assertEqual(payload["raw_sample_count"], 5)
+        self.assertEqual(payload["active_duration_seconds"], 301)
+        self.assertEqual(payload["trailing_inactive_trim_seconds"], 119)
+        self.assertAlmostEqual(payload["average_watts"], 208.3333333333)
+        self.assertIn("trailing_inactive_trimmed", payload["data_quality_flags"])
+
     def test_load_activity_tcx_gz(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "activity.tcx.gz"
