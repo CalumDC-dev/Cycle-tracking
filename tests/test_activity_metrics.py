@@ -22,6 +22,26 @@ class ActivityMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["best_5s_cadence"], 87.0)
         self.assertIn("missing_source_hr", metrics["data_quality_flags"])
 
+    def test_analyse_activity_samples_trims_trailing_inactive_time(self):
+        samples = [
+            ActivitySample(elapsed_seconds=0, watts=200, cadence=80, speed_mps=5.0, hr=120),
+            ActivitySample(elapsed_seconds=60, watts=210, cadence=82, speed_mps=5.1, hr=122),
+            ActivitySample(elapsed_seconds=300, watts=215, cadence=83, speed_mps=5.2, hr=123),
+            ActivitySample(elapsed_seconds=301, watts=0, cadence=0, speed_mps=0, hr=118),
+            ActivitySample(elapsed_seconds=420, watts=0, cadence=0, speed_mps=0, hr=112),
+        ]
+
+        metrics = analyse_activity_samples(samples, duration_seconds=420)
+
+        self.assertEqual(metrics["sample_count"], 3)
+        self.assertEqual(metrics["raw_sample_count"], 5)
+        self.assertEqual(metrics["trimmed_sample_count"], 2)
+        self.assertAlmostEqual(metrics["active_duration_seconds"], 301)
+        self.assertAlmostEqual(metrics["trailing_inactive_trim_seconds"], 119)
+        self.assertAlmostEqual(metrics["average_watts"], 208.3333333333)
+        self.assertAlmostEqual(metrics["average_source_hr"], 121.6666666667)
+        self.assertIn("trailing_inactive_trimmed", metrics["data_quality_flags"])
+
     def test_source_metric_rows_flattens_payload_for_export_and_dashboard(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

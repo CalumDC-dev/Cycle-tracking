@@ -11,6 +11,9 @@ from typing import Any
 
 
 PEAK_WINDOWS = (5, 30, 60, 300)
+INACTIVE_WATTS_THRESHOLD = 1.0
+INACTIVE_CADENCE_THRESHOLD = 1.0
+INACTIVE_SPEED_MPS_THRESHOLD = 0.2
 
 
 @dataclass(frozen=True)
@@ -29,16 +32,27 @@ def analyse_activity_samples(
 ) -> dict[str, Any]:
     """Return compact, source-agnostic metrics for trackpoint samples."""
 
-    ordered = sorted(samples, key=lambda sample: sample.elapsed_seconds)
+    ordered_raw = sorted(samples, key=lambda sample: sample.elapsed_seconds)
+    ordered = trim_trailing_inactive_samples(ordered_raw)
+    raw_duration = _sample_duration(ordered_raw, duration_seconds)
+    active_duration = _active_duration_seconds(ordered_raw, ordered, raw_duration)
+    trimmed_count = len(ordered_raw) - len(ordered)
+    trimmed_seconds = _trimmed_seconds(raw_duration, active_duration)
     metrics: dict[str, Any] = {
         "analysis_version": 1,
         "sample_count": len(ordered),
-        "sample_duration_seconds": _sample_duration(ordered, duration_seconds),
+        "sample_duration_seconds": active_duration,
+        "active_duration_seconds": active_duration,
         **_metric_summary("watts", [sample.watts for sample in ordered]),
         **_metric_summary("cadence", [sample.cadence for sample in ordered]),
         **_metric_summary("speed_mps", [sample.speed_mps for sample in ordered]),
         **_metric_summary("source_hr", [sample.hr for sample in ordered]),
     }
+    if trimmed_count > 0:
+        metrics["raw_sample_count"] = len(ordered_raw)
+        metrics["trimmed_sample_count"] = trimmed_count
+        metrics["raw_duration_seconds"] = raw_duration
+        metrics["trailing_inactive_trim_seconds"] = trimmed_seconds
 
     for window in PEAK_WINDOWS:
         metrics[f"best_{window}s_watts"] = _best_window_average(ordered, "watts", window)
@@ -48,8 +62,29 @@ def analyse_activity_samples(
     metrics["watts_variability_pct"] = _variability_pct([sample.watts for sample in ordered])
     metrics["cadence_variability_pct"] = _variability_pct([sample.cadence for sample in ordered])
     metrics["speed_variability_pct"] = _variability_pct([sample.speed_mps for sample in ordered])
-    metrics["data_quality_flags"] = _data_quality_flags(ordered)
+    metrics["data_quality_flags"] = _data_quality_flags(ordered, trimmed_count=trimmed_count)
     return {key: value for key, value in metrics.items() if value not in (None, [], {})}
+
+
+def trim_trailing_inactive_samples(samples: list[ActivitySample]) -> list[ActivitySample]:
+    if not samples:
+        return []
+    end = len(samples)
+    while end > 0 and _is_inactive_sample(samples[end - 1]):
+        end -= 1
+    return samples[:end] if end > 0 else samples
+
+
+def _is_inactive_sample(sample: ActivitySample) -> bool:
+    return (
+        _is_blank_or_below(sample.watts, INACTIVE_WATTS_THRESHOLD)
+        and _is_blank_or_below(sample.cadence, INACTIVE_CADENCE_THRESHOLD)
+        and _is_blank_or_below(sample.speed_mps, INACTIVE_SPEED_MPS_THRESHOLD)
+    )
+
+
+def _is_blank_or_below(value: float | None, threshold: float) -> bool:
+    return value is None or value <= threshold
 
 
 def source_metric_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
@@ -202,6 +237,50 @@ def _sample_duration(samples: list[ActivitySample], duration_seconds: float | No
     return max(sample.elapsed_seconds for sample in samples) - min(sample.elapsed_seconds for sample in samples)
 
 
+def _active_duration_seconds(
+    raw_samples: list[ActivitySample],
+    active_samples: list[ActivitySample],
+    raw_duration: float | None,
+) -> float | None:
+    if not active_samples:
+        return raw_duration
+    if len(raw_samples) == len(active_samples):
+        return raw_duration
+    start = min(sample.elapsed_seconds for sample in raw_samples)
+    next_inactive = raw_samples[len(active_samples)] if len(raw_samples) > len(active_samples) else None
+    if next_inactive is not None:
+        duration = max(0.0, next_inactive.elapsed_seconds - start)
+    else:
+        end = max(sample.elapsed_seconds for sample in active_samples)
+        duration = max(0.0, end - start + _typical_sample_interval(active_samples))
+    if raw_duration is not None:
+        return min(duration, raw_duration)
+    return duration
+
+
+def _typical_sample_interval(samples: list[ActivitySample]) -> float:
+    if len(samples) < 2:
+        return 1.0
+    deltas = [
+        samples[index + 1].elapsed_seconds - sample.elapsed_seconds
+        for index, sample in enumerate(samples[:-1])
+        if samples[index + 1].elapsed_seconds > sample.elapsed_seconds
+    ]
+    if not deltas:
+        return 1.0
+    deltas.sort()
+    middle = len(deltas) // 2
+    if len(deltas) % 2:
+        return deltas[middle]
+    return (deltas[middle - 1] + deltas[middle]) / 2
+
+
+def _trimmed_seconds(raw_duration: float | None, active_duration: float | None) -> float | None:
+    if raw_duration is None or active_duration is None:
+        return None
+    return max(0.0, raw_duration - active_duration)
+
+
 def _metric_summary(name: str, values: list[float | None]) -> dict[str, float | None]:
     clean = [value for value in values if value is not None]
     if not clean:
@@ -261,10 +340,12 @@ def _second_series(samples: list[ActivitySample], metric: str) -> list[float]:
     return series
 
 
-def _data_quality_flags(samples: list[ActivitySample]) -> list[str]:
+def _data_quality_flags(samples: list[ActivitySample], *, trimmed_count: int = 0) -> list[str]:
     flags = []
     if not samples:
         return ["no_trackpoints"]
+    if trimmed_count > 0:
+        flags.append("trailing_inactive_trimmed")
     if not any(sample.watts is not None for sample in samples):
         flags.append("no_watts")
     if not any(sample.cadence is not None for sample in samples):

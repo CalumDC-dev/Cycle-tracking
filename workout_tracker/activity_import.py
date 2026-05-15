@@ -269,12 +269,13 @@ def _load_tcx_root(root: ET.Element, fallback_title: str, source: str) -> list[d
         calories = sum(_float(_child_text(lap, "Calories")) or 0 for lap in laps)
         samples = _trackpoint_samples(activity)
         analysis = analyse_activity_samples(samples, duration_seconds=duration if duration else None)
+        active_duration = _active_duration_from_analysis(analysis, duration if duration else None)
         row: dict[str, Any] = {
             "source": source,
             "source_activity_id": activity_id or fallback_title,
             "title": fallback_title.replace("_", " "),
             "started_on": _start_time(activity, laps, activity_id),
-            "duration_seconds": duration if duration else None,
+            "duration_seconds": active_duration,
             "raw_distance": distance_m / 1000 if distance_m else None,
             "hr": analysis.get("average_source_hr"),
             "raw_payload": json.dumps(
@@ -333,6 +334,7 @@ def _load_fit_bytes(data: bytes, name: str, source: str) -> list[dict[str, Any]]
     distance_m = _fit_number(session.get("total_distance"))
     samples = _fit_record_samples(records)
     analysis = analyse_activity_samples(samples, duration_seconds=duration)
+    active_duration = _active_duration_from_analysis(analysis, duration)
     title = _display_stem(name).replace("_", " ")
     started_on = session.get("start_time") or _first_record_time(records) or file_id.get("time_created")
     payload = {
@@ -376,7 +378,7 @@ def _load_fit_bytes(data: bytes, name: str, source: str) -> list[dict[str, Any]]
             "source_activity_id": _fit_source_activity_id(file_id, started_on, title),
             "title": title,
             "started_on": started_on,
-            "duration_seconds": duration,
+            "duration_seconds": active_duration,
             "raw_distance": distance_m / 1000 if distance_m is not None else None,
             "hr": payload.get("average_source_hr"),
             "raw_payload": json.dumps(_compact_payload(payload), sort_keys=True),
@@ -521,6 +523,11 @@ def _fit_lap_payload(lap: dict[str, Any]) -> dict[str, Any]:
             "max_speed_mps": lap.get("enhanced_max_speed") or lap.get("max_speed"),
         }
     )
+
+
+def _active_duration_from_analysis(analysis: dict[str, Any], fallback: float | None) -> float | None:
+    value = analysis.get("active_duration_seconds")
+    return _fit_number(value) if value is not None else fallback
 
 
 def _load_zip(path: Path, source: str) -> list[dict[str, Any]]:
