@@ -1023,7 +1023,7 @@ def fit_calibration_source_rows(conn: sqlite3.Connection, limit: int = 12) -> li
     output = []
     for row in rows:
         source = fit_calibration_source_defaults(conn, row)
-        if source is not None:
+        if source is not None and is_calibration_candidate_source(source):
             output.append(source)
         if len(output) >= limit:
             break
@@ -1073,6 +1073,11 @@ def fit_calibration_source_defaults(
         "raw_payload": row["raw_payload"],
         "quality_flags": quality_flags,
     }
+
+
+def is_calibration_candidate_source(source: dict[str, object]) -> bool:
+    duration = maybe_float(source.get("duration_minutes"))
+    return duration is not None and 4.5 <= duration <= 6.5
 
 
 def uploaded_fit_calibration_source_defaults(
@@ -1872,7 +1877,7 @@ def fit_calibration_upload_form(current_mass_kg: float | None) -> str:
 
 def fit_calibration_sources_table(rows: list[dict[str, object]]) -> str:
     if not rows:
-        return '<div class="empty">No FIT source activities with device watts have been imported yet.</div>'
+        return '<div class="empty">No imported FIT activities match the 5 minute calibration protocol yet.</div>'
     body = []
     for row in rows:
         quality = f'<br><span class="muted">{escape(str(row["quality_flags"]))}</span>' if row.get("quality_flags") else ""

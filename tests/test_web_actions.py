@@ -679,6 +679,34 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="source_raw_activity_id"', html)
         self.assertIn("Preview factor", html)
 
+    def test_fit_calibration_source_rows_exclude_non_protocol_durations(self):
+        for source_id, duration_seconds in [
+            ("too-short", "122"),
+            ("too-long", "1321"),
+        ]:
+            add_raw_activity(
+                self.conn,
+                {
+                    "source": "strava",
+                    "source_activity_id": source_id,
+                    "title": source_id,
+                    "started_on": "2026-05-14T10:00:00Z",
+                    "duration_seconds": duration_seconds,
+                    "raw_distance": "4.2",
+                    "raw_payload": json.dumps(
+                        {
+                            "format": "fit",
+                            "average_watts": 350,
+                            "average_cadence": 126,
+                        }
+                    ),
+                },
+            )
+
+        sources = fit_calibration_source_rows(self.conn)
+
+        self.assertEqual(sources, [])
+
     def test_fit_calibration_upload_preview_persists_source_metadata(self):
         upload_bytes = b"fake-fit-bytes"
         payload = json.dumps(
