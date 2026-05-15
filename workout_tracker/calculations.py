@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 import sqlite3
 from typing import Any
+
+
+KM_TO_MILES = 0.621371192237334
 
 
 @dataclass(frozen=True)
@@ -303,8 +307,47 @@ def daily_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return summaries
 
 
+def weekly_distance_summary(daily_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    weeks: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in daily_rows:
+        performed_on = _date_from_text(row.get("date"))
+        if performed_on is None:
+            continue
+        iso = performed_on.isocalendar()
+        key = (iso.year, iso.week)
+        week_start = performed_on - timedelta(days=performed_on.weekday())
+        week = weeks.setdefault(
+            key,
+            {
+                "iso_year": iso.year,
+                "iso_week": iso.week,
+                "week_start": week_start.isoformat(),
+                "week_end": (week_start + timedelta(days=6)).isoformat(),
+                "workout_days": 0,
+                "distance_km": 0.0,
+                "distance_miles": 0.0,
+            },
+        )
+        week["workout_days"] += 1
+        week["distance_km"] += float(row.get("total_distance") or 0)
+
+    for week in weeks.values():
+        week["distance_miles"] = week["distance_km"] * KM_TO_MILES
+    return sorted(weeks.values(), key=lambda row: row["week_start"], reverse=True)
+
+
+def _date_from_text(value: object) -> date | None:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except ValueError:
+        return None
+
+
 def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
     summary = daily_summary(conn)
+    weekly_distance = weekly_distance_summary(summary)
     sprints = calculated_sprints(conn)
     laps = calculated_laps(conn)
     mass_rows = conn.execute("SELECT measured_on, mass_kg FROM mass_log ORDER BY measured_on").fetchall()
@@ -331,6 +374,7 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
         "best_laps_by_circuit": best_laps_by_circuit(laps),
         "mass_change": mass_change,
         "daily": summary,
+        "weekly_distance": weekly_distance,
         "mass": [dict(row) for row in mass_rows],
     }
 

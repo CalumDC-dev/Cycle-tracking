@@ -27,6 +27,7 @@ from workout_tracker.web import (
     import_activity_file_to_review,
     parse_post_params,
     populate_missing_duplicate_hr,
+    render_dashboard,
     render_insights,
     render_entries,
     render_calibration,
@@ -250,6 +251,32 @@ class WebActionTests(unittest.TestCase):
         self.assertNotIn('name="lap_time_sec"', html)
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
+
+    def test_render_dashboard_shows_weekly_distance_in_km_and_miles(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "duration_minutes": "5",
+                "device_distance": "8",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-03",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+            },
+        )
+
+        html = render_dashboard(self.conn)
+
+        self.assertIn("Weekly Distance", html)
+        self.assertIn("2026-W18", html)
+        self.assertIn("2026-04-27 to 2026-05-03", html)
+        self.assertIn("6.00", html)
+        self.assertIn("3.73", html)
 
     def test_maintenance_flags_possible_manual_duplicate_entries(self):
         add_sprint_entry(

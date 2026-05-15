@@ -11,6 +11,7 @@ from workout_tracker.calculations import (
     estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
     suggest_activity_classification,
+    weekly_distance_summary,
 )
 from workout_tracker.database import init_db
 
@@ -70,6 +71,23 @@ class CalculationTests(unittest.TestCase):
         self.assertAlmostEqual(row["average_watts"], 45.0)
         self.assertAlmostEqual(row["average_rpm"], 115.0)
 
+    def test_weekly_distance_summary_reports_km_and_miles(self):
+        rows = weekly_distance_summary(
+            [
+                {"date": "2026-05-01", "total_distance": 6.0},
+                {"date": "2026-05-03", "total_distance": 4.0},
+                {"date": "2026-05-04", "total_distance": 5.0},
+            ]
+        )
+
+        self.assertEqual([row["iso_week"] for row in rows], [19, 18])
+        self.assertEqual(rows[0]["week_start"], "2026-05-04")
+        self.assertAlmostEqual(rows[0]["distance_km"], 5.0)
+        self.assertAlmostEqual(rows[0]["distance_miles"], 3.1068559612)
+        self.assertEqual(rows[1]["week_start"], "2026-04-27")
+        self.assertAlmostEqual(rows[1]["distance_km"], 10.0)
+        self.assertAlmostEqual(rows[1]["distance_miles"], 6.2137119224)
+
     def test_dashboard_metrics_report_best_lap_and_mass_change(self):
         metrics = dashboard_metrics(self.conn)
 
@@ -80,6 +98,8 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(metrics["best_lap_circuit"], "Test Circuit")
         self.assertEqual(metrics["best_laps_by_circuit"][0]["circuit_name"], "Test Circuit")
         self.assertAlmostEqual(metrics["mass_change"], -1.0)
+        self.assertAlmostEqual(metrics["weekly_distance"][0]["distance_km"], 6.0)
+        self.assertAlmostEqual(metrics["weekly_distance"][0]["distance_miles"], 3.7282271534)
 
     def test_best_laps_by_circuit_keeps_each_circuit_separate(self):
         self.conn.execute(

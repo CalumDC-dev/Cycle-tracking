@@ -524,6 +524,8 @@ def page(title: str, body: str, active: str) -> str:
 def render_dashboard(conn: sqlite3.Connection) -> str:
     metrics = dashboard_metrics(conn)
     daily = metrics["daily"]
+    weekly_distance = metrics["weekly_distance"]
+    latest_week = weekly_distance[0] if weekly_distance else None
     source_rows = source_metric_rows(conn)
     calories = [(row["date"], row["total_calories"]) for row in daily]
     watts = [(row["date"], row["average_watts"] or 0) for row in daily]
@@ -538,6 +540,7 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
   <div class="metrics">
     {metric("Workout days", metrics["workout_days"], "green")}
     {metric("Total distance", fmt_num(metrics["total_distance"], 2), "green")}
+    {metric("Latest week", distance_km_miles(latest_week), "green")}
     {metric("Total calories", fmt_num(metrics["total_calories"], 0), "amber")}
     {metric("Workout time", fmt_minutes(metrics["total_minutes"]), "blue")}
     {metric("Sprints", metrics["sprint_count"], "blue")}
@@ -555,6 +558,10 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
     {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
     {metric("Best avg cadence", fmt_num(max_metric(source_rows, "average_cadence"), 0), "green")}
   </div>
+</section>
+<section class="band">
+  <h2>Weekly Distance</h2>
+  {weekly_distance_table(weekly_distance)}
 </section>
 <section class="band">
   <h2>Trends</h2>
@@ -2102,6 +2109,28 @@ def daily_table(rows: list[dict[str, object]]) -> str:
             for row in rows
         ],
     )
+
+
+def weekly_distance_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Week", "Date range", "Workout days", "Distance km", "Distance miles"],
+        [
+            [
+                f"{row['iso_year']}-W{int(row['iso_week']):02d}",
+                f"{row['week_start']} to {row['week_end']}",
+                row["workout_days"],
+                fmt_num(row["distance_km"], 2),
+                fmt_num(row["distance_miles"], 2),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def distance_km_miles(row: dict[str, object] | None) -> str:
+    if row is None:
+        return ""
+    return f"{fmt_num(row.get('distance_km'), 2)} km / {fmt_num(row.get('distance_miles'), 2)} mi"
 
 
 def best_laps_table(rows: list[dict[str, object]]) -> str:
