@@ -74,17 +74,19 @@ class CalculationTests(unittest.TestCase):
     def test_weekly_distance_summary_reports_km_and_miles(self):
         rows = weekly_distance_summary(
             [
-                {"date": "2026-05-01", "total_distance": 6.0},
-                {"date": "2026-05-03", "total_distance": 4.0},
-                {"date": "2026-05-04", "total_distance": 5.0},
+                {"date": "2026-05-01", "total_distance": 6.0, "total_minutes": 20.0},
+                {"date": "2026-05-03", "total_distance": 4.0, "total_minutes": 15.0},
+                {"date": "2026-05-04", "total_distance": 5.0, "total_minutes": 30.0},
             ]
         )
 
         self.assertEqual([row["iso_week"] for row in rows], [19, 18])
         self.assertEqual(rows[0]["week_start"], "2026-05-04")
+        self.assertAlmostEqual(rows[0]["total_minutes"], 30.0)
         self.assertAlmostEqual(rows[0]["distance_km"], 5.0)
         self.assertAlmostEqual(rows[0]["distance_miles"], 3.1068559612)
         self.assertEqual(rows[1]["week_start"], "2026-04-27")
+        self.assertAlmostEqual(rows[1]["total_minutes"], 35.0)
         self.assertAlmostEqual(rows[1]["distance_km"], 10.0)
         self.assertAlmostEqual(rows[1]["distance_miles"], 6.2137119224)
 

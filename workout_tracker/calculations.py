@@ -360,11 +360,13 @@ def weekly_distance_summary(daily_rows: list[dict[str, Any]]) -> list[dict[str, 
                 "week_start": week_start.isoformat(),
                 "week_end": (week_start + timedelta(days=6)).isoformat(),
                 "workout_days": 0,
+                "total_minutes": 0.0,
                 "distance_km": 0.0,
                 "distance_miles": 0.0,
             },
         )
         week["workout_days"] += 1
+        week["total_minutes"] += float(row.get("total_minutes") or 0)
         week["distance_km"] += float(row.get("total_distance") or 0)
 
     for week in weeks.values():
