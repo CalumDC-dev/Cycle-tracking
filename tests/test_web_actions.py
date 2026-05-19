@@ -275,6 +275,8 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Weekly Distance", html)
         self.assertIn("2026-W18", html)
         self.assertIn("27-04-2026 to 03-05-2026", html)
+        self.assertIn("Workout time", html)
+        self.assertIn("9:00", html)
         self.assertIn("6.00", html)
         self.assertIn("3.73", html)
 
@@ -478,7 +480,16 @@ class WebActionTests(unittest.TestCase):
                 "started_on": "2026-05-04T07:30",
                 "review_status": "already_logged",
                 "session_type": "sprint",
-                "raw_payload": json.dumps({"average_watts": 500, "best_300s_watts": 480, "average_cadence": 80}),
+                "raw_payload": json.dumps(
+                    {
+                        "average_watts": 500,
+                        "best_300s_watts": 480,
+                        "best_60s_watts": 520,
+                        "average_cadence": 80,
+                        "cadence_variability_pct": 4.5,
+                        "data_quality_flags": ["missing_source_hr"],
+                    }
+                ),
             },
         )
 
@@ -495,6 +506,13 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(coverage_rows[7]["resistance"], 8)
         self.assertAlmostEqual(coverage_rows[7]["scaling"], 0.12)
         self.assertEqual(coverage_rows[7]["provenance"], "measured")
+        self.assertIn("FIT Source Summary", html)
+        self.assertIn("FIT Source Trends", html)
+        self.assertIn("Source Performance By Resistance", html)
+        self.assertIn("Source Data Quality", html)
+        self.assertIn("Recent Source Metrics", html)
+        self.assertIn("Avg device W", html)
+        self.assertIn("missing source hr", html)
         self.assertIn("Circuit Progress", html)
         self.assertIn("Strength Signals", html)
         self.assertIn("Resistance Calibration Coverage", html)

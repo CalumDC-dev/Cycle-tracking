@@ -871,6 +871,8 @@ def render_insights(conn: sqlite3.Connection) -> str:
     sprints = calculated_sprints(conn)
     laps = calculated_laps(conn)
     source_rows = source_metric_rows(conn)
+    source_by_resistance = source_performance_by_resistance(source_rows)
+    source_quality = source_quality_rows(source_rows)
     circuit_rows = circuit_progress_rows(laps)
     strength_rows = strength_signal_rows(sprints, laps)
     calibration_rows = calibration_coverage_rows(conn)
@@ -881,6 +883,10 @@ def render_insights(conn: sqlite3.Connection) -> str:
     ]
     sprint_rpm = [(sprint.started_at or sprint.performed_on, sprint.rpm) for sprint in sprints if sprint.rpm is not None]
     sprint_hr = [(sprint.started_at or sprint.performed_on, sprint.hr) for sprint in sprints if sprint.hr is not None]
+    source_average_watts = source_metric_points(source_rows, "average_watts")
+    source_device_watts = source_metric_points(source_rows, "device_average_watts")
+    source_best_60s = source_metric_points(source_rows, "best_60s_watts")
+    source_cadence_variability = source_metric_points(source_rows, "cadence_variability_pct")
     return f"""
 <section class="band">
   <h2>Insight Summary</h2>
@@ -893,6 +899,17 @@ def render_insights(conn: sqlite3.Connection) -> str:
   </div>
 </section>
 <section class="band">
+  <h2>FIT Source Summary</h2>
+  <div class="metrics">
+    {metric("Source sessions", len(source_rows), "blue")}
+    {metric("With estimated watts", count_present(source_rows, "average_watts"), "green")}
+    {metric("Best avg est watts", fmt_num(max_metric(source_rows, "average_watts"), 0), "amber")}
+    {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
+    {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
+    {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
+  </div>
+</section>
+<section class="band">
   <h2>Sprint Trends</h2>
   <div class="grid-two">
     {chart_panel("Estimated Watts", sprint_watts, "#1f5a85", "W")}
@@ -902,12 +919,33 @@ def render_insights(conn: sqlite3.Connection) -> str:
   </div>
 </section>
 <section class="band">
+  <h2>FIT Source Trends</h2>
+  <div class="grid-two">
+    {chart_panel("Average Estimated Watts", source_average_watts, "#1f5a85", "W")}
+    {chart_panel("Average Device Watts", source_device_watts, "#6a4c93", "W")}
+    {chart_panel("Best 60 Second Estimated Watts", source_best_60s, "#a66200", "W")}
+    {chart_panel("Cadence Variability", source_cadence_variability, "#a33b3b", "%")}
+  </div>
+</section>
+<section class="band">
   <h2>Circuit Progress</h2>
   {circuit_progress_table(circuit_rows)}
 </section>
 <section class="band">
   <h2>Source Highlights</h2>
   {source_highlights_table(source_rows)}
+</section>
+<section class="band">
+  <h2>Source Performance By Resistance</h2>
+  {source_resistance_table(source_by_resistance)}
+</section>
+<section class="band">
+  <h2>Source Data Quality</h2>
+  {source_quality_table(source_quality)}
+</section>
+<section class="band">
+  <h2>Recent Source Metrics</h2>
+  {source_metrics_table(source_rows[:12])}
 </section>
 <section class="band">
   <h2>Strength Signals</h2>
@@ -2080,6 +2118,85 @@ def source_highlights_table(rows: list[dict[str, object]]) -> str:
     return table(["Metric", "Value", "Start", "Type", "Circuit", "Resistance"], highlights)
 
 
+def source_performance_by_resistance(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    groups: dict[str, dict[str, object]] = {}
+    for row in rows:
+        key = str(row.get("resistance") or "Unknown")
+        group = groups.setdefault(
+            key,
+            {
+                "resistance": key,
+                "sessions": 0,
+                "average_watts": [],
+                "device_average_watts": [],
+                "best_300s_watts": [],
+                "average_cadence": [],
+                "watts_variability_pct": [],
+                "flagged_sessions": 0,
+            },
+        )
+        group["sessions"] = int(group["sessions"]) + 1
+        append_numeric(group["average_watts"], row.get("average_watts"))
+        append_numeric(group["device_average_watts"], row.get("device_average_watts"))
+        append_numeric(group["best_300s_watts"], row.get("best_300s_watts"))
+        append_numeric(group["average_cadence"], row.get("average_cadence"))
+        append_numeric(group["watts_variability_pct"], row.get("watts_variability_pct"))
+        if source_flags(row):
+            group["flagged_sessions"] = int(group["flagged_sessions"]) + 1
+
+    output = []
+    for group in groups.values():
+        best_300s = group["best_300s_watts"]
+        output.append({
+            "resistance": group["resistance"],
+            "sessions": group["sessions"],
+            "average_watts": average_value(group["average_watts"]),
+            "device_average_watts": average_value(group["device_average_watts"]),
+            "best_300s_watts": max(best_300s) if best_300s else None,
+            "average_cadence": average_value(group["average_cadence"]),
+            "watts_variability_pct": average_value(group["watts_variability_pct"]),
+            "flagged_sessions": group["flagged_sessions"],
+        })
+    return sorted(output, key=lambda row: resistance_sort_key(row["resistance"]))
+
+
+def source_resistance_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Resistance", "Sessions", "Avg est watts", "Avg device watts", "Best 5m est", "Avg RPM", "Watts var", "Flagged"],
+        [
+            [
+                row["resistance"],
+                row["sessions"],
+                fmt_num(row["average_watts"], 0),
+                fmt_num(row["device_average_watts"], 0),
+                fmt_num(row["best_300s_watts"], 0),
+                fmt_num(row["average_cadence"], 0),
+                fmt_num(row["watts_variability_pct"], 1),
+                row["flagged_sessions"],
+            ]
+            for row in rows
+        ],
+    )
+
+
+def source_quality_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for flag in source_flags(row):
+            counts[flag] = counts.get(flag, 0) + 1
+    return [
+        {"flag": flag.replace("_", " "), "sessions": count}
+        for flag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def source_quality_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Quality flag", "Sessions"],
+        [[row["flag"], row["sessions"]] for row in rows],
+    )
+
+
 def strength_signals_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Date", "Start", "Type", "Session", "Resistance", "RPM", "Est watts", "HR", "Time", "Calories"],
@@ -2147,12 +2264,13 @@ def daily_table(rows: list[dict[str, object]]) -> str:
 
 def weekly_distance_table(rows: list[dict[str, object]]) -> str:
     return table(
-        ["Week", "Date range", "Workout days", "Distance km", "Distance miles"],
+        ["Week", "Date range", "Workout days", "Workout time", "Distance km", "Distance miles"],
         [
             [
                 f"{row['iso_year']}-W{int(row['iso_week']):02d}",
                 f"{fmt_date(row['week_start'])} to {fmt_date(row['week_end'])}",
                 row["workout_days"],
+                fmt_minutes(row["total_minutes"]),
                 fmt_num(row["distance_km"], 2),
                 fmt_num(row["distance_miles"], 2),
             ]
@@ -2185,14 +2303,16 @@ def best_laps_table(rows: list[dict[str, object]]) -> str:
 
 def source_metrics_table(rows: list[dict[str, object]]) -> str:
     return f"""<div class="table-scroll">{table(
-        ["Start", "Type", "Circuit", "Resistance", "Avg est watts", "Best 5m", "Best 60s", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
+        ["Start", "Type", "Circuit", "Resistance", "Avg device W", "Avg est W", "Best 5m device", "Best 5m est", "Best 60s est", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
         [
             [
                 fmt_datetime(row["started_on"]),
                 row["session_type"],
                 row["circuit"],
                 row["resistance"],
+                fmt_num(row["device_average_watts"], 0),
                 fmt_num(row["average_watts"], 0),
+                fmt_num(row["device_best_300s_watts"], 0),
                 fmt_num(row["best_300s_watts"], 0),
                 fmt_num(row["best_60s_watts"], 0),
                 fmt_num(row["average_cadence"], 0),
@@ -2411,6 +2531,39 @@ def chart_edge_label(label: object) -> str:
 def source_metric_points(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
     ordered = list(reversed(rows))
     return [(str(row["started_on"] or row["id"]), row.get(key)) for row in ordered]
+
+
+def count_present(rows: list[dict[str, object]], key: str) -> int:
+    return sum(1 for row in rows if row.get(key) not in (None, ""))
+
+
+def count_rows_with_flag(rows: list[dict[str, object]], flag: str) -> int:
+    return sum(1 for row in rows if flag in source_flags(row))
+
+
+def source_flags(row: dict[str, object]) -> list[str]:
+    raw = row.get("data_quality_flags")
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, list):
+        return [str(flag).strip() for flag in raw if str(flag).strip()]
+    return [flag.strip() for flag in str(raw).split(";") if flag.strip()]
+
+
+def append_numeric(values: object, value: object) -> None:
+    if value in (None, "") or not isinstance(values, list):
+        return
+    try:
+        values.append(float(value))
+    except (TypeError, ValueError):
+        return
+
+
+def resistance_sort_key(value: object) -> tuple[int, int | str]:
+    try:
+        return (0, int(str(value)))
+    except (TypeError, ValueError):
+        return (1, str(value))
 
 
 def max_metric(rows: list[dict[str, object]], key: str) -> float | None:
