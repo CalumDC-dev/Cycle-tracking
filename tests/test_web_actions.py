@@ -35,7 +35,10 @@ from workout_tracker.web import (
     review_actions,
     calibration_coverage_rows,
     circuit_progress_rows,
+    estimated_threshold_watts,
     maintenance_items,
+    personal_record_rows,
+    progress_marker_rows,
     promote_activity_form,
     promote_raw_activity,
     raw_activity_has_entry,
@@ -550,18 +553,32 @@ class WebActionTests(unittest.TestCase):
 
         sprints = calculated_sprints(self.conn)
         laps = calculated_laps(self.conn)
+        source_rows = web_module.source_metric_rows(self.conn)
+        weekly_rows = web_module.weekly_distance_summary(web_module.daily_summary(self.conn))
         circuit_rows = circuit_progress_rows(laps)
+        progress_rows = progress_marker_rows(sprints, source_rows, weekly_rows)
+        record_rows = personal_record_rows(sprints, source_rows, weekly_rows, circuit_rows)
+        threshold = estimated_threshold_watts(source_rows, sprints)
         strength_rows = strength_signal_rows(sprints, laps)
         coverage_rows = calibration_coverage_rows(self.conn)
         html = render_insights(self.conn)
 
         self.assertEqual(circuit_rows[0]["circuit"], "Manual Circuit")
         self.assertAlmostEqual(circuit_rows[0]["change_minutes"], 1.0)
+        self.assertIn("Sprint avg est watts", [row["measure"] for row in progress_rows])
+        self.assertIn("Best sprint watts per bpm", [row["record"] for row in record_rows])
+        self.assertAlmostEqual(threshold["watts"], 81.6)
+        self.assertEqual(threshold["basis"], "5 minute source peak x 85%")
         self.assertEqual(strength_rows[0]["resistance"], 8)
         self.assertEqual(coverage_rows[7]["resistance"], 8)
         self.assertAlmostEqual(coverage_rows[7]["scaling"], 0.12)
         self.assertEqual(coverage_rows[7]["provenance"], "measured")
         self.assertIn("Progress Overview", html)
+        self.assertIn("Progress Markers", html)
+        self.assertIn("Personal Records", html)
+        self.assertIn("Threshold Proxy", html)
+        self.assertIn("Estimated threshold proxy", html)
+        self.assertIn("Sprint watts per bpm", html)
         self.assertIn("insight-tabs", html)
         self.assertIn("Latest week time", html)
         self.assertIn("Performance", html)
