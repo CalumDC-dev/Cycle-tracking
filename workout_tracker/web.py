@@ -412,7 +412,7 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
                 self._html("Dashboard", render_dashboard(conn), "dashboard")
             elif parsed.path == "/entries":
                 conn = self._conn()
-                self._html("Entries", render_entries(conn), "entries")
+                self._html("Entries", render_entries(conn, parse_query_params(parsed.query)), "entries")
             elif parsed.path == "/circuits":
                 conn = self._conn()
                 self._html("Circuits", render_circuits(conn), "circuits")
@@ -702,10 +702,17 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 """
 
 
-def render_entries(conn: sqlite3.Connection) -> str:
-    sprints = calculated_sprints(conn)
-    laps = calculated_laps(conn)
+def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = None) -> str:
+    filters = normalize_entry_filters(filters or {})
+    all_sprints = latest_first(calculated_sprints(conn))
+    all_laps = latest_first(calculated_laps(conn))
+    filtered_sprints = filter_entries(all_sprints, filters, "sprint")
+    filtered_laps = filter_entries(all_laps, filters, "lap")
+    sprints = limit_entries(filtered_sprints, filters)
+    laps = limit_entries(filtered_laps, filters)
     circuits = circuit_rows_with_goals(conn)
+    show_sprints = filters["entry_type"] in ("all", "sprint")
+    show_laps = filters["entry_type"] in ("all", "lap")
     return f"""
 <section class="band">
   <h2>Add Sprint Entry</h2>
@@ -742,14 +749,185 @@ def render_entries(conn: sqlite3.Connection) -> str:
   {circuit_goal_script()}
 </section>
 <section class="band">
+  <h2>Entry Filters</h2>
+  {entry_filter_form(filters, circuits)}
+  <div class="muted" style="margin-top:10px;">Showing latest entries first. {entry_filter_summary(filtered_sprints, filtered_laps, sprints, laps, filters)}</div>
+</section>
+{'' if not show_sprints else f'''
+<section class="band">
   <h2>Sprint Entries</h2>
   {render_sprint_entries_table(sprints)}
-</section>
+</section>'''}
+{'' if not show_laps else f'''
 <section class="band">
   <h2>Lap Entries</h2>
   {render_lap_entries_table(laps, circuits)}
-</section>
+</section>'''}
 """
+
+
+def parse_query_params(query: str) -> dict[str, str]:
+    parsed = parse_qs(query, keep_blank_values=True)
+    return {key: values[-1] for key, values in parsed.items() if values}
+
+
+def normalize_entry_filters(filters: dict[str, str]) -> dict[str, str]:
+    entry_type = filters.get("entry_type", "all")
+    if entry_type not in ("all", "sprint", "lap"):
+        entry_type = "all"
+    limit = filters.get("limit", "25")
+    if limit not in ("25", "50", "all"):
+        limit = "25"
+    return {
+        "from": filters.get("from", "").strip(),
+        "to": filters.get("to", "").strip(),
+        "entry_type": entry_type,
+        "circuit_id": filters.get("circuit_id", "").strip(),
+        "resistance": filters.get("resistance", "").strip(),
+        "missing": "1" if filters.get("missing") == "1" else "",
+        "limit": limit,
+    }
+
+
+def entry_filter_form(filters: dict[str, str], circuits: list[dict[str, object]]) -> str:
+    return f"""
+<form class="stack" method="get" action="/entries">
+  <label>From<input name="from" type="date" value="{escape(filters['from'])}"></label>
+  <label>To<input name="to" type="date" value="{escape(filters['to'])}"></label>
+  <label>Type<select name="entry_type">{entry_type_options(filters['entry_type'])}</select></label>
+  <label>Circuit<select name="circuit_id">{entry_filter_circuit_options(circuits, filters['circuit_id'])}</select></label>
+  <label>Resistance<select name="resistance">{entry_filter_resistance_options(filters['resistance'])}</select></label>
+  <label>Limit<select name="limit">{entry_limit_options(filters['limit'])}</select></label>
+  <label><span>Needs attention</span><input name="missing" type="checkbox" value="1" {"checked" if filters["missing"] else ""}></label>
+  <button type="submit">Apply filters</button>
+  <a href="/entries">Clear filters</a>
+</form>"""
+
+
+def entry_type_options(current: str) -> str:
+    return "".join(
+        filter_option(value, label, current)
+        for value, label in [
+            ("all", "All entries"),
+            ("sprint", "Sprints"),
+            ("lap", "Laps"),
+        ]
+    )
+
+
+def entry_filter_circuit_options(circuits: list[dict[str, object]], current: str) -> str:
+    options = [filter_option("", "All circuits", current)]
+    for circuit in circuits:
+        options.append(filter_option(str(circuit["id"]), str(circuit["name"]), current))
+    return "".join(options)
+
+
+def entry_filter_resistance_options(current: str) -> str:
+    return filter_option("", "All levels", current) + "".join(
+        filter_option(str(resistance), str(resistance), current)
+        for resistance in resistance_values()
+    )
+
+
+def entry_limit_options(current: str) -> str:
+    return "".join(
+        filter_option(value, label, current)
+        for value, label in [
+            ("25", "Latest 25"),
+            ("50", "Latest 50"),
+            ("all", "Show all"),
+        ]
+    )
+
+
+def filter_option(value: str, label: str, current: str) -> str:
+    selected = " selected" if value == current else ""
+    return f'<option value="{escape(value)}"{selected}>{escape(label)}</option>'
+
+
+def latest_first(entries: list[object]) -> list[object]:
+    return sorted(entries, key=entry_sort_key, reverse=True)
+
+
+def entry_sort_key(entry: object) -> tuple[str, str, int]:
+    performed_on = str(getattr(entry, "performed_on", ""))
+    started_at = str(getattr(entry, "started_at", "") or "")
+    return (performed_on, started_at, int(getattr(entry, "id", 0)))
+
+
+def filter_entries(entries: list[object], filters: dict[str, str], entry_type: str) -> list[object]:
+    output = []
+    for entry in entries:
+        if not entry_matches_filters(entry, filters, entry_type):
+            continue
+        output.append(entry)
+    return output
+
+
+def entry_matches_filters(entry: object, filters: dict[str, str], entry_type: str) -> bool:
+    performed_on = str(getattr(entry, "performed_on", ""))
+    if filters["from"] and performed_on < filters["from"]:
+        return False
+    if filters["to"] and performed_on > filters["to"]:
+        return False
+    if filters["entry_type"] != "all" and filters["entry_type"] != entry_type:
+        return False
+    if filters["circuit_id"]:
+        if entry_type != "lap" or str(getattr(entry, "circuit_id", "") or "") != filters["circuit_id"]:
+            return False
+    if filters["resistance"] and str(getattr(entry, "resistance", "") or "") != filters["resistance"]:
+        return False
+    if filters["missing"] and not entry_needs_attention(entry, entry_type):
+        return False
+    return True
+
+
+def entry_needs_attention(entry: object, entry_type: str) -> bool:
+    common_missing = (
+        not getattr(entry, "started_at", None)
+        or getattr(entry, "hr", None) is None
+        or getattr(entry, "resistance", None) is None
+    )
+    if entry_type == "sprint":
+        return (
+            common_missing
+            or getattr(entry, "sprint_index", None) is None
+            or getattr(entry, "duration_minutes", None) is None
+            or getattr(entry, "device_watts", None) is None
+            or (
+                getattr(entry, "resistance", None) is not None
+                and getattr(entry, "device_watts", None) is not None
+                and getattr(entry, "estimated_watts", None) is None
+            )
+            or getattr(entry, "calories_mets", None) is None
+        )
+    return (
+        common_missing
+        or getattr(entry, "lap_index", None) is None
+        or getattr(entry, "circuit_id", None) is None
+        or getattr(entry, "lap_time_minutes", None) is None
+        or getattr(entry, "calories_mets", None) is None
+    )
+
+
+def limit_entries(entries: list[object], filters: dict[str, str]) -> list[object]:
+    if filters["limit"] == "all":
+        return entries
+    return entries[: int(filters["limit"])]
+
+
+def entry_filter_summary(
+    filtered_sprints: list[object],
+    filtered_laps: list[object],
+    displayed_sprints: list[object],
+    displayed_laps: list[object],
+    filters: dict[str, str],
+) -> str:
+    filtered_total = len(filtered_sprints) + len(filtered_laps)
+    displayed_total = len(displayed_sprints) + len(displayed_laps)
+    if filters["limit"] == "all" or displayed_total == filtered_total:
+        return f"{displayed_total} matching entries."
+    return f"{displayed_total} of {filtered_total} matching entries. Select Show all to reveal older matches."
 
 
 def render_sprint_entries_table(sprints: list[object]) -> str:
@@ -1389,7 +1567,7 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
     laps = calculated_laps(conn)
     for sprint in sprints:
         context = f"Sprint {sprint.sprint_index or sprint.id}"
-        action = f"/entries#sprint-{sprint.id}"
+        action = f"/entries?limit=all#sprint-{sprint.id}"
         maybe_add_issue(
             items, not sprint.started_at, "Sprint", sprint.performed_on, sprint.started_at, context,
             "Tidying", "Missing start time", "Needed for reliable duplicate matching.", action,
@@ -1421,7 +1599,7 @@ def maintenance_items(conn: sqlite3.Connection) -> list[dict[str, object]]:
 
     for lap in laps:
         context = f"{lap.circuit_name or 'Lap'} {lap.lap_index or lap.id}"
-        action = f"/entries#lap-{lap.id}"
+        action = f"/entries?limit=all#lap-{lap.id}"
         maybe_add_issue(
             items, not lap.started_at, "Lap", lap.performed_on, lap.started_at, context,
             "Tidying", "Missing start time", "Needed for reliable duplicate matching.", action,
@@ -1524,7 +1702,7 @@ def add_manual_duplicate_issues(
                     "Analysis blocker",
                     "Possible duplicate entry",
                     reason or "Similar sprint entries were found.",
-                    f"/entries#sprint-{sprint.id}",
+                    f"/entries?limit=all#sprint-{sprint.id}",
                     duplicate_actions("sprint", sprint, candidate),
                 )
 
@@ -1563,7 +1741,7 @@ def add_manual_duplicate_issues(
                     "Analysis blocker",
                     "Possible duplicate entry",
                     reason or "Similar lap entries were found.",
-                    f"/entries#lap-{lap.id}",
+                    f"/entries?limit=all#lap-{lap.id}",
                     duplicate_actions("lap", lap, candidate),
                 )
 
@@ -1656,7 +1834,7 @@ def maintenance_table(items: list[dict[str, object]]) -> str:
 
 def duplicate_actions(entry_type: str, first: object, second: object) -> list[dict[str, object]]:
     return [
-        {"kind": "link", "href": f"/entries#{entry_type}-{second.id}", "label": "Open match"},
+        {"kind": "link", "href": f"/entries?limit=all#{entry_type}-{second.id}", "label": "Open match"},
         {
             "kind": "not_duplicate",
             "entry_type": entry_type,

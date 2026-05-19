@@ -252,6 +252,61 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('Calories (HR/MET)', html)
         self.assertIn('<option value="4" selected>4</option>', html)
 
+    def test_render_entries_filters_and_limits_latest_entries(self):
+        for index in range(30):
+            add_sprint_entry(
+                self.conn,
+                {
+                    "performed_on": f"2026-05-{index + 1:02d}",
+                    "sprint_index": str(index + 1),
+                    "duration_minutes": "5",
+                    "device_watts": "250",
+                    "hr": "120",
+                    "resistance": "4",
+                },
+            )
+
+        html = render_entries(self.conn)
+        all_html = render_entries(self.conn, {"limit": "all"})
+
+        self.assertIn("Entry Filters", html)
+        self.assertIn("Latest 25", html)
+        self.assertEqual(html.count('/entries/sprint/update'), 25)
+        self.assertEqual(all_html.count('/entries/sprint/update'), 30)
+        self.assertIn('value="2026-05-30"', html)
+        self.assertNotIn('value="2026-05-01"', html)
+
+    def test_render_entries_can_filter_by_type_circuit_resistance_and_missing(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-02",
+                "duration_minutes": "5",
+                "device_watts": "250",
+                "hr": "120",
+                "resistance": "4",
+            },
+        )
+        add_lap_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-03",
+                "circuit_id": "1",
+                "lap_time_minutes": "4",
+                "resistance": "4",
+            },
+        )
+
+        html = render_entries(
+            self.conn,
+            {"entry_type": "lap", "circuit_id": "1", "resistance": "4", "missing": "1", "limit": "all"},
+        )
+
+        self.assertNotIn("Sprint Entries", html)
+        self.assertIn("Lap Entries", html)
+        self.assertIn('name="lap_index"', html)
+        self.assertIn("1 matching entries", html)
+
     def test_render_dashboard_shows_weekly_distance_in_km_and_miles(self):
         add_sprint_entry(
             self.conn,
@@ -417,7 +472,7 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Analysis blocker", html)
         self.assertIn("Tidying", html)
         self.assertIn("Optional enrichment", html)
-        self.assertIn("/entries#sprint-", html)
+        self.assertIn("/entries?limit=all#sprint-", html)
         self.assertIn("/review", html)
         self.assertIn("/export/backup.zip", html)
 
