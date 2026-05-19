@@ -29,6 +29,7 @@ from .calculations import (
     mass_for_date,
     resistance_scale,
     suggest_activity_classification,
+    weekly_distance_summary,
 )
 from .database import connect, init_db
 from .exporter import backup_bundle_bytes, backup_filename, csv_text
@@ -122,6 +123,99 @@ main {
   margin-top: 8px;
   font-size: 24px;
   line-height: 1.15;
+}
+.progress-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+}
+.insight-card {
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--blue);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+  min-height: 104px;
+}
+.insight-card.green { border-left-color: var(--green); }
+.insight-card.amber { border-left-color: var(--amber); }
+.insight-card.red { border-left-color: var(--red); }
+.insight-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.insight-card strong {
+  display: block;
+  margin-top: 7px;
+  font-size: 25px;
+  line-height: 1.15;
+}
+.insight-card small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+}
+.insight-tabs {
+  display: grid;
+  gap: 14px;
+}
+.insight-tabs > input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.tab-labels {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.tab-labels label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--blue);
+  background: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+.insight-panel {
+  display: none;
+}
+.insight-panel h3 {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+.panel-block {
+  margin-top: 18px;
+}
+.panel-block:first-child {
+  margin-top: 0;
+}
+#insights-overview:checked ~ .tab-labels label[for="insights-overview"],
+#insights-performance:checked ~ .tab-labels label[for="insights-performance"],
+#insights-consistency:checked ~ .tab-labels label[for="insights-consistency"],
+#insights-circuits:checked ~ .tab-labels label[for="insights-circuits"],
+#insights-strength:checked ~ .tab-labels label[for="insights-strength"],
+#insights-quality:checked ~ .tab-labels label[for="insights-quality"] {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+#insights-overview:checked ~ .overview-panel,
+#insights-performance:checked ~ .performance-panel,
+#insights-consistency:checked ~ .consistency-panel,
+#insights-circuits:checked ~ .circuits-panel,
+#insights-strength:checked ~ .strength-panel,
+#insights-quality:checked ~ .quality-panel {
+  display: block;
 }
 .grid-two {
   display: grid;
@@ -873,6 +967,7 @@ def render_insights(conn: sqlite3.Connection) -> str:
     source_rows = source_metric_rows(conn)
     source_by_resistance = source_performance_by_resistance(source_rows)
     source_quality = source_quality_rows(source_rows)
+    weekly_rows = weekly_distance_summary(daily_summary(conn))
     circuit_rows = circuit_progress_rows(laps)
     strength_rows = strength_signal_rows(sprints, laps)
     calibration_rows = calibration_coverage_rows(conn)
@@ -889,71 +984,92 @@ def render_insights(conn: sqlite3.Connection) -> str:
     source_cadence_variability = source_metric_points(source_rows, "cadence_variability_pct")
     return f"""
 <section class="band">
-  <h2>Insight Summary</h2>
-  <div class="metrics">
-    {metric("Circuits tracked", len(circuit_rows), "green")}
-    {metric("Best circuit gain", best_circuit_gain(circuit_rows), "green")}
-    {metric("Best sprint watts", fmt_num(max_sprint_watts(sprints), 1), "amber")}
-    {metric("Strength signals", len(strength_rows), "blue")}
-    {metric("Scaling coverage", calibrated_resistance_count(calibration_rows), "blue")}
-  </div>
-</section>
-<section class="band">
-  <h2>FIT Source Summary</h2>
-  <div class="metrics">
-    {metric("Source sessions", len(source_rows), "blue")}
-    {metric("With estimated watts", count_present(source_rows, "average_watts"), "green")}
-    {metric("Best avg est watts", fmt_num(max_metric(source_rows, "average_watts"), 0), "amber")}
-    {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
-    {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
-    {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
-  </div>
-</section>
-<section class="band">
-  <h2>Sprint Trends</h2>
-  <div class="grid-two">
-    {chart_panel("Estimated Watts", sprint_watts, "#1f5a85", "W")}
-    {chart_panel("Cadence", sprint_rpm, "#2f7d59", "rpm")}
-    {chart_panel("Heart Rate", sprint_hr, "#a33b3b", "bpm")}
-    {chart_panel("Best 5 Minute Estimated Watts", source_metric_points(source_rows, "best_300s_watts"), "#a66200", "W")}
-  </div>
-</section>
-<section class="band">
-  <h2>FIT Source Trends</h2>
-  <div class="grid-two">
-    {chart_panel("Average Estimated Watts", source_average_watts, "#1f5a85", "W")}
-    {chart_panel("Average Device Watts", source_device_watts, "#6a4c93", "W")}
-    {chart_panel("Best 60 Second Estimated Watts", source_best_60s, "#a66200", "W")}
-    {chart_panel("Cadence Variability", source_cadence_variability, "#a33b3b", "%")}
-  </div>
-</section>
-<section class="band">
-  <h2>Circuit Progress</h2>
-  {circuit_progress_table(circuit_rows)}
-</section>
-<section class="band">
-  <h2>Source Highlights</h2>
-  {source_highlights_table(source_rows)}
-</section>
-<section class="band">
-  <h2>Source Performance By Resistance</h2>
-  {source_resistance_table(source_by_resistance)}
-</section>
-<section class="band">
-  <h2>Source Data Quality</h2>
-  {source_quality_table(source_quality)}
-</section>
-<section class="band">
-  <h2>Recent Source Metrics</h2>
-  {source_metrics_table(source_rows[:12])}
-</section>
-<section class="band">
-  <h2>Strength Signals</h2>
-  {strength_signals_table(strength_rows)}
-</section>
-<section class="band">
-  <h2>Resistance Calibration Coverage</h2>
-  {calibration_coverage_table(calibration_rows)}
+  <h2>Insights</h2>
+  {insight_tabs(
+      overview=f'''
+        <div class="panel-block">
+          <h3>Progress Overview</h3>
+          {insight_progress_cards(source_rows, circuit_rows, weekly_rows, strength_rows, calibration_rows)}
+        </div>
+        <div class="panel-block">
+          <h3>Source Highlights</h3>
+          {source_highlights_table(source_rows)}
+        </div>
+      ''',
+      performance=f'''
+        <div class="panel-block">
+          <h3>FIT Source Summary</h3>
+          <div class="metrics">
+            {metric("Source sessions", len(source_rows), "blue")}
+            {metric("With estimated watts", count_present(source_rows, "average_watts"), "green")}
+            {metric("Best avg est watts", fmt_num(max_metric(source_rows, "average_watts"), 0), "amber")}
+            {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
+            {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
+            {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
+          </div>
+        </div>
+        <div class="panel-block">
+          <h3>Sprint Trends</h3>
+          <div class="grid-two">
+            {chart_panel("Estimated Watts", sprint_watts, "#1f5a85", "W")}
+            {chart_panel("Cadence", sprint_rpm, "#2f7d59", "rpm")}
+            {chart_panel("Heart Rate", sprint_hr, "#a33b3b", "bpm")}
+            {chart_panel("Best 5 Minute Estimated Watts", source_metric_points(source_rows, "best_300s_watts"), "#a66200", "W")}
+          </div>
+        </div>
+        <div class="panel-block">
+          <h3>FIT Source Trends</h3>
+          <div class="grid-two">
+            {chart_panel("Average Estimated Watts", source_average_watts, "#1f5a85", "W")}
+            {chart_panel("Average Device Watts", source_device_watts, "#6a4c93", "W")}
+            {chart_panel("Best 60 Second Estimated Watts", source_best_60s, "#a66200", "W")}
+            {chart_panel("Cadence Variability", source_cadence_variability, "#a33b3b", "%")}
+          </div>
+        </div>
+        <div class="panel-block">
+          <h3>Source Performance By Resistance</h3>
+          {source_resistance_table(source_by_resistance)}
+        </div>
+        <div class="panel-block">
+          <h3>Recent Source Metrics</h3>
+          {source_metrics_table(source_rows[:12])}
+        </div>
+      ''',
+      consistency=f'''
+        <div class="panel-block">
+          <h3>Weekly Consistency</h3>
+          <div class="grid-two">
+            {chart_panel("Weekly Workout Time", weekly_metric_points(weekly_rows, "total_minutes"), "#1f5a85", "min")}
+            {chart_panel("Weekly Distance", weekly_metric_points(weekly_rows, "distance_km"), "#2f7d59", "km")}
+          </div>
+        </div>
+        <div class="panel-block">
+          {weekly_distance_table(weekly_rows)}
+        </div>
+      ''',
+      circuits=f'''
+        <div class="panel-block">
+          <h3>Circuit Progress</h3>
+          {circuit_progress_table(circuit_rows)}
+        </div>
+      ''',
+      strength=f'''
+        <div class="panel-block">
+          <h3>Strength Signals</h3>
+          {strength_signals_table(strength_rows)}
+        </div>
+      ''',
+      quality=f'''
+        <div class="panel-block">
+          <h3>Source Data Quality</h3>
+          {source_quality_table(source_quality)}
+        </div>
+        <div class="panel-block">
+          <h3>Resistance Calibration Coverage</h3>
+          {calibration_coverage_table(calibration_rows)}
+        </div>
+      ''',
+  )}
 </section>
 """
 
@@ -2118,6 +2234,136 @@ def source_highlights_table(rows: list[dict[str, object]]) -> str:
     return table(["Metric", "Value", "Start", "Type", "Circuit", "Resistance"], highlights)
 
 
+def insight_tabs(
+    *,
+    overview: str,
+    performance: str,
+    consistency: str,
+    circuits: str,
+    strength: str,
+    quality: str,
+) -> str:
+    return f"""
+<div class="insight-tabs">
+  <input id="insights-overview" name="insight-tab" type="radio" checked>
+  <input id="insights-performance" name="insight-tab" type="radio">
+  <input id="insights-consistency" name="insight-tab" type="radio">
+  <input id="insights-circuits" name="insight-tab" type="radio">
+  <input id="insights-strength" name="insight-tab" type="radio">
+  <input id="insights-quality" name="insight-tab" type="radio">
+  <div class="tab-labels" role="tablist" aria-label="Insight sections">
+    <label for="insights-overview">Overview</label>
+    <label for="insights-performance">Performance</label>
+    <label for="insights-consistency">Consistency</label>
+    <label for="insights-circuits">Circuits</label>
+    <label for="insights-strength">Strength</label>
+    <label for="insights-quality">Data Quality</label>
+  </div>
+  <div class="insight-panel overview-panel">{overview}</div>
+  <div class="insight-panel performance-panel">{performance}</div>
+  <div class="insight-panel consistency-panel">{consistency}</div>
+  <div class="insight-panel circuits-panel">{circuits}</div>
+  <div class="insight-panel strength-panel">{strength}</div>
+  <div class="insight-panel quality-panel">{quality}</div>
+</div>"""
+
+
+def insight_progress_cards(
+    source_rows: list[dict[str, object]],
+    circuit_rows: list[dict[str, object]],
+    weekly_rows: list[dict[str, object]],
+    strength_rows: list[dict[str, object]],
+    calibration_rows: list[dict[str, object]],
+) -> str:
+    latest_week = weekly_rows[0] if weekly_rows else None
+    previous_week = weekly_rows[1] if len(weekly_rows) > 1 else None
+    flagged_sessions = sum(1 for row in source_rows if source_flags(row))
+    cards = [
+        insight_card(
+            "Latest week time",
+            fmt_minutes(latest_week.get("total_minutes")) if latest_week else "",
+            week_delta_detail(latest_week, previous_week, "total_minutes", format_minutes_delta),
+            "blue",
+        ),
+        insight_card(
+            "Latest week distance",
+            f"{fmt_num(latest_week.get('distance_km'), 2)} km" if latest_week else "",
+            week_delta_detail(latest_week, previous_week, "distance_km", format_km_delta),
+            "green",
+        ),
+        insight_card(
+            "Best 5 min est watts",
+            fmt_num(max_metric(source_rows, "best_300s_watts"), 0),
+            f"{count_present(source_rows, 'best_300s_watts')} source sessions",
+            "amber",
+        ),
+        insight_card(
+            "Best 60 sec est watts",
+            fmt_num(max_metric(source_rows, "best_60s_watts"), 0),
+            f"{count_present(source_rows, 'best_60s_watts')} source sessions",
+            "amber",
+        ),
+        insight_card(
+            "Circuit gain",
+            best_circuit_gain(circuit_rows),
+            f"{len(circuit_rows)} circuits tracked",
+            "green",
+        ),
+        insight_card(
+            "Strength signals",
+            len(strength_rows),
+            "high resistance, controlled cadence",
+            "blue",
+        ),
+        insight_card(
+            "Scaling coverage",
+            calibrated_resistance_count(calibration_rows),
+            "resistance levels with factors",
+            "blue",
+        ),
+        insight_card(
+            "Flagged source sessions",
+            flagged_sessions,
+            f"{count_rows_with_flag(source_rows, 'missing_source_hr')} missing source HR",
+            "red" if flagged_sessions else "green",
+        ),
+    ]
+    return f'<div class="progress-cards">{"".join(cards)}</div>'
+
+
+def insight_card(label: str, value: object, detail: str, tone: str = "blue") -> str:
+    return (
+        f'<div class="insight-card {escape(tone)}">'
+        f"<span>{escape(label)}</span>"
+        f"<strong>{escape(str(value))}</strong>"
+        f"<small>{escape(detail)}</small>"
+        f"</div>"
+    )
+
+
+def week_delta_detail(
+    latest_week: dict[str, object] | None,
+    previous_week: dict[str, object] | None,
+    key: str,
+    formatter: object,
+) -> str:
+    if latest_week is None:
+        return "No weekly data"
+    if previous_week is None:
+        return "No previous week"
+    latest = float(latest_week.get(key) or 0)
+    previous = float(previous_week.get(key) or 0)
+    return f"{formatter(latest - previous)} vs previous week"
+
+
+def format_minutes_delta(value: float) -> str:
+    return signed_minutes(value)
+
+
+def format_km_delta(value: float) -> str:
+    return f"{signed_num(value, 2)} km"
+
+
 def source_performance_by_resistance(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     groups: dict[str, dict[str, object]] = {}
     for row in rows:
@@ -2531,6 +2777,11 @@ def chart_edge_label(label: object) -> str:
 def source_metric_points(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
     ordered = list(reversed(rows))
     return [(str(row["started_on"] or row["id"]), row.get(key)) for row in ordered]
+
+
+def weekly_metric_points(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
+    ordered = list(reversed(rows))
+    return [(str(row["week_start"]), row.get(key)) for row in ordered]
 
 
 def count_present(rows: list[dict[str, object]], key: str) -> int:
