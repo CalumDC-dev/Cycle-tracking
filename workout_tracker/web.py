@@ -1149,6 +1149,9 @@ def render_insights(conn: sqlite3.Connection) -> str:
     circuit_rows = circuit_progress_rows(laps)
     strength_rows = strength_signal_rows(sprints, laps)
     calibration_rows = calibration_coverage_rows(conn)
+    progress_rows = progress_marker_rows(sprints, source_rows, weekly_rows)
+    record_rows = personal_record_rows(sprints, source_rows, weekly_rows, circuit_rows)
+    threshold = estimated_threshold_watts(source_rows, sprints)
     sprint_watts = [
         (sprint.started_at or sprint.performed_on, sprint.estimated_watts)
         for sprint in sprints
@@ -1170,6 +1173,14 @@ def render_insights(conn: sqlite3.Connection) -> str:
           {insight_progress_cards(source_rows, circuit_rows, weekly_rows, strength_rows, calibration_rows)}
         </div>
         <div class="panel-block">
+          <h3>Progress Markers</h3>
+          {progress_marker_table(progress_rows)}
+        </div>
+        <div class="panel-block">
+          <h3>Personal Records</h3>
+          {personal_record_table(record_rows)}
+        </div>
+        <div class="panel-block">
           <h3>Source Highlights</h3>
           {source_highlights_table(source_rows)}
         </div>
@@ -1182,9 +1193,14 @@ def render_insights(conn: sqlite3.Connection) -> str:
             {metric("With estimated watts", count_present(source_rows, "average_watts"), "green")}
             {metric("Best avg est watts", fmt_num(max_metric(source_rows, "average_watts"), 0), "amber")}
             {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
+            {metric("Threshold proxy", threshold_value_label(threshold), "green")}
             {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
             {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
           </div>
+        </div>
+        <div class="panel-block">
+          <h3>Threshold Proxy</h3>
+          {threshold_proxy_panel(threshold)}
         </div>
         <div class="panel-block">
           <h3>Sprint Trends</h3>
@@ -2519,6 +2535,318 @@ def insight_card(label: str, value: object, detail: str, tone: str = "blue") -> 
     )
 
 
+def progress_marker_rows(
+    sprints: list[object],
+    source_rows: list[dict[str, object]],
+    weekly_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return [
+        trend_comparison_row(
+            "Sprint avg est watts",
+            sprint_metric_series(sprints, "estimated_watts"),
+            "W",
+            0,
+            "Latest 5 sprints vs previous 5",
+        ),
+        trend_comparison_row(
+            "Sprint watts per bpm",
+            sprint_efficiency_series(sprints),
+            "W/bpm",
+            2,
+            "Estimated watts divided by HR",
+        ),
+        trend_comparison_row(
+            "Sprint cadence",
+            sprint_metric_series(sprints, "rpm"),
+            "rpm",
+            0,
+            "Latest 5 sprints vs previous 5",
+        ),
+        trend_comparison_row(
+            "Source 5 min peak",
+            source_metric_series(source_rows, "best_300s_watts"),
+            "W",
+            0,
+            "FIT/TCX source peak, scaled by resistance",
+        ),
+        trend_comparison_row(
+            "Weekly workout time",
+            weekly_series(weekly_rows, "total_minutes"),
+            "min",
+            0,
+            "Latest 4 weeks vs previous 4",
+            sample_count=4,
+        ),
+        trend_comparison_row(
+            "Weekly distance",
+            weekly_series(weekly_rows, "distance_km"),
+            "km",
+            2,
+            "Latest 4 weeks vs previous 4",
+            sample_count=4,
+        ),
+    ]
+
+
+def trend_comparison_row(
+    measure: str,
+    series: list[tuple[str, float | None]],
+    unit: str,
+    digits: int,
+    basis: str,
+    *,
+    sample_count: int = 5,
+) -> dict[str, object]:
+    clean = sorted_metric_series(series)
+    latest_values = [value for _, value in clean[-sample_count:]]
+    previous_values = [value for _, value in clean[-sample_count * 2:-sample_count]]
+    latest = average_value(latest_values)
+    previous = average_value(previous_values)
+    change = latest - previous if latest is not None and previous is not None else None
+    if not previous_values:
+        basis = f"{basis}; needs more history"
+    return {
+        "measure": measure,
+        "recent": value_with_unit(latest, unit, digits),
+        "previous": value_with_unit(previous, unit, digits),
+        "change": value_with_unit(change, unit, digits, signed=True),
+        "basis": basis,
+    }
+
+
+def sprint_metric_series(sprints: list[object], metric_name: str) -> list[tuple[str, float | None]]:
+    return [
+        (str(getattr(sprint, "started_at", None) or getattr(sprint, "performed_on", "")), maybe_float(getattr(sprint, metric_name, None)))
+        for sprint in sprints
+    ]
+
+
+def sprint_efficiency_series(sprints: list[object]) -> list[tuple[str, float | None]]:
+    output = []
+    for sprint in sprints:
+        watts = maybe_float(getattr(sprint, "estimated_watts", None))
+        hr = maybe_float(getattr(sprint, "hr", None))
+        efficiency = watts / hr if watts is not None and hr not in (None, 0) else None
+        output.append((str(getattr(sprint, "started_at", None) or getattr(sprint, "performed_on", "")), efficiency))
+    return output
+
+
+def source_metric_series(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
+    return [(str(row.get("started_on") or row.get("id") or ""), maybe_float(row.get(key))) for row in rows]
+
+
+def weekly_series(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
+    return [(str(row.get("week_start") or ""), maybe_float(row.get(key))) for row in rows]
+
+
+def sorted_metric_series(series: list[tuple[str, float | None]]) -> list[tuple[str, float]]:
+    clean = [(label, float(value)) for label, value in series if value is not None]
+    return sorted(clean, key=lambda item: metric_sort_key(item[0]))
+
+
+def metric_sort_key(label: str) -> str:
+    parsed = parse_datetime(label)
+    if parsed is not None:
+        return parsed.isoformat()
+    return str(label)
+
+
+def value_with_unit(value: object, unit: str, digits: int, *, signed: bool = False) -> str:
+    if value is None:
+        return ""
+    number = signed_num(value, digits) if signed else fmt_num(value, digits)
+    return f"{number} {unit}".strip()
+
+
+def progress_marker_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Measure", "Recent", "Previous", "Change", "Basis"],
+        [
+            [row["measure"], row["recent"], row["previous"], row["change"], row["basis"]]
+            for row in rows
+        ],
+    )
+
+
+def personal_record_rows(
+    sprints: list[object],
+    source_rows: list[dict[str, object]],
+    weekly_rows: list[dict[str, object]],
+    circuit_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows = []
+    sprint_watts = best_object_by_value(sprints, "estimated_watts")
+    if sprint_watts is not None:
+        rows.append(record_row(
+            "Best sprint avg est watts",
+            f"{fmt_num(getattr(sprint_watts, 'estimated_watts'), 0)} W",
+            getattr(sprint_watts, "started_at", None) or getattr(sprint_watts, "performed_on", ""),
+            f"Resistance {getattr(sprint_watts, 'resistance', '')}",
+        ))
+    sprint_efficiency = best_efficiency_sprint(sprints)
+    if sprint_efficiency is not None:
+        sprint, value = sprint_efficiency
+        rows.append(record_row(
+            "Best sprint watts per bpm",
+            f"{fmt_num(value, 2)} W/bpm",
+            getattr(sprint, "started_at", None) or getattr(sprint, "performed_on", ""),
+            f"{fmt_num(getattr(sprint, 'estimated_watts'), 0)} W at HR {getattr(sprint, 'hr', '')}",
+        ))
+    for label, key, digits in [
+        ("Best source 5 min est watts", "best_300s_watts", 0),
+        ("Best source 60 sec est watts", "best_60s_watts", 0),
+        ("Best source avg cadence", "average_cadence", 0),
+    ]:
+        row = best_source_row(source_rows, key)
+        if row is not None:
+            rows.append(record_row(label, value_with_unit(row.get(key), "W" if "watts" in key else "rpm", digits), row.get("started_on"), source_record_context(row)))
+    week_time = best_row_by_value(weekly_rows, "total_minutes")
+    if week_time is not None:
+        rows.append(record_row("Most workout time in a week", fmt_minutes(week_time.get("total_minutes")), week_time.get("week_start"), f"{fmt_num(week_time.get('distance_km'), 2)} km"))
+    week_distance = best_row_by_value(weekly_rows, "distance_km")
+    if week_distance is not None:
+        rows.append(record_row("Longest normalised week", f"{fmt_num(week_distance.get('distance_km'), 2)} km", week_distance.get("week_start"), fmt_minutes(week_distance.get("total_minutes"))))
+    circuit_gains = [row for row in circuit_rows if maybe_float(row.get("change_minutes")) is not None and float(row["change_minutes"]) > 0]
+    best_gain = best_row_by_value(circuit_gains, "change_minutes")
+    if best_gain is not None:
+        rows.append(record_row("Biggest circuit improvement", signed_minutes(best_gain.get("change_minutes")), best_gain.get("latest_date"), str(best_gain.get("circuit", ""))))
+    return rows
+
+
+def record_row(label: str, value: str, date_value: object, context: str) -> dict[str, object]:
+    return {
+        "record": label,
+        "value": value,
+        "date": fmt_date(date_value),
+        "context": context,
+    }
+
+
+def personal_record_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Record", "Value", "Date", "Context"],
+        [[row["record"], row["value"], row["date"], row["context"]] for row in rows],
+    )
+
+
+def best_object_by_value(rows: list[object], key: str) -> object | None:
+    candidates = [row for row in rows if maybe_float(getattr(row, key, None)) is not None]
+    return max(candidates, key=lambda row: float(getattr(row, key))) if candidates else None
+
+
+def best_efficiency_sprint(sprints: list[object]) -> tuple[object, float] | None:
+    candidates = []
+    for sprint in sprints:
+        watts = maybe_float(getattr(sprint, "estimated_watts", None))
+        hr = maybe_float(getattr(sprint, "hr", None))
+        if watts is not None and hr not in (None, 0):
+            candidates.append((sprint, watts / hr))
+    return max(candidates, key=lambda item: item[1]) if candidates else None
+
+
+def best_row_by_value(rows: list[dict[str, object]], key: str) -> dict[str, object] | None:
+    candidates = [row for row in rows if maybe_float(row.get(key)) is not None]
+    return max(candidates, key=lambda row: float(row[key])) if candidates else None
+
+
+def source_record_context(row: dict[str, object]) -> str:
+    pieces = [str(row.get("session_type") or "source")]
+    if row.get("resistance") not in (None, ""):
+        pieces.append(f"resistance {row['resistance']}")
+    if row.get("circuit"):
+        pieces.append(str(row["circuit"]))
+    return " - ".join(pieces)
+
+
+def estimated_threshold_watts(
+    source_rows: list[dict[str, object]],
+    sprints: list[object],
+) -> dict[str, object]:
+    candidates: list[dict[str, object]] = []
+    for row in source_rows:
+        duration_minutes = duration_seconds_to_minutes(row.get("duration_seconds"))
+        average_watts = maybe_float(row.get("average_watts"))
+        best_300s = maybe_float(row.get("best_300s_watts"))
+        if duration_minutes is not None and duration_minutes >= 20 and average_watts is not None:
+            candidates.append(threshold_candidate(
+                average_watts * 0.95,
+                "20 minute source average x 95%",
+                row.get("started_on"),
+                3,
+            ))
+        if best_300s is not None:
+            candidates.append(threshold_candidate(
+                best_300s * 0.85,
+                "5 minute source peak x 85%",
+                row.get("started_on"),
+                2,
+            ))
+    for sprint in sprints:
+        duration = maybe_float(getattr(sprint, "duration_minutes", None))
+        watts = maybe_float(getattr(sprint, "estimated_watts", None))
+        if duration is not None and duration >= 10 and watts is not None:
+            candidates.append(threshold_candidate(
+                watts * 0.90,
+                "10 minute sprint average x 90%",
+                getattr(sprint, "started_at", None) or getattr(sprint, "performed_on", ""),
+                1,
+            ))
+    if not candidates:
+        return {}
+    return max(candidates, key=lambda candidate: (int(candidate["priority"]), float(candidate["watts"])))
+
+
+def threshold_candidate(watts: float, basis: str, date_value: object, priority: int) -> dict[str, object]:
+    return {
+        "watts": watts,
+        "basis": basis,
+        "date": date_value,
+        "priority": priority,
+    }
+
+
+def threshold_value_label(threshold: dict[str, object]) -> str:
+    watts = threshold.get("watts")
+    return f"{fmt_num(watts, 0)} W" if watts is not None else ""
+
+
+def threshold_proxy_panel(threshold: dict[str, object]) -> str:
+    if not threshold:
+        return '<div class="empty">No threshold proxy yet. Add source sessions with estimated watts to seed this view.</div>'
+    return f"""
+<div class="metrics">
+  {metric("Estimated threshold proxy", threshold_value_label(threshold), "green")}
+  {metric("Source date", fmt_date(threshold.get("date")), "blue")}
+</div>
+<div class="muted" style="margin:10px 0 12px;">
+  This is a bike-relative benchmark from calibrated estimated watts, useful for trends and zones rather than claiming true power-meter FTP. Basis: {escape(str(threshold.get("basis") or ""))}.
+</div>
+{threshold_band_table(threshold)}
+"""
+
+
+def threshold_band_table(threshold: dict[str, object]) -> str:
+    watts = maybe_float(threshold.get("watts"))
+    if watts is None:
+        return ""
+    rows = [
+        ["Easy", threshold_band_range(watts, 0.0, 0.55), "Recovery or very light spinning"],
+        ["Steady", threshold_band_range(watts, 0.56, 0.75), "Sustainable aerobic work"],
+        ["Tempo", threshold_band_range(watts, 0.76, 0.90), "Purposeful but controlled efforts"],
+        ["Threshold", threshold_band_range(watts, 0.91, 1.05), "Hard sustained efforts"],
+        ["Peak", f">{fmt_num(watts * 1.05, 0)} W", "Short bursts and sprint work"],
+    ]
+    return table(["Band", "Estimated watts", "Use"], rows)
+
+
+def threshold_band_range(threshold_watts: float, lower: float, upper: float) -> str:
+    low = threshold_watts * lower
+    high = threshold_watts * upper
+    if lower <= 0:
+        return f"<{fmt_num(high, 0)} W"
+    return f"{fmt_num(low, 0)}-{fmt_num(high, 0)} W"
+
+
 def week_delta_detail(
     latest_week: dict[str, object] | None,
     previous_week: dict[str, object] | None,
@@ -3021,7 +3349,7 @@ def calibrated_resistance_count(rows: list[dict[str, object]]) -> int:
 
 
 def best_circuit_gain(rows: list[dict[str, object]]) -> str:
-    gains = [float(row["change_minutes"]) for row in rows if row.get("change_minutes") is not None]
+    gains = [float(row["change_minutes"]) for row in rows if maybe_float(row.get("change_minutes")) is not None and float(row["change_minutes"]) > 0]
     if not gains:
         return ""
     best = max(gains)
