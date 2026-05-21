@@ -5,11 +5,14 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import math
 import sqlite3
 from typing import Any
 
 
 KM_TO_MILES = 0.621371192237334
+DEFAULT_PEDAL_TO_FLYWHEEL_RATIO = 8.7
+DEFAULT_FLYWHEEL_DIAMETER_MM = 150.0
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,41 @@ def device_distance_for_length(length: float | None, length_scale: float | None)
     if length is None or length_scale in (None, 0):
         return None
     return float(length) / float(length_scale)
+
+
+def distance_per_pedal_revolution_m(calibration: sqlite3.Row | dict[str, Any]) -> float | None:
+    ratio = _calibration_float(calibration, "pedal_to_flywheel_ratio", DEFAULT_PEDAL_TO_FLYWHEEL_RATIO)
+    diameter_mm = _calibration_float(calibration, "flywheel_diameter_mm", DEFAULT_FLYWHEEL_DIAMETER_MM)
+    if ratio is None or diameter_mm is None or ratio <= 0 or diameter_mm <= 0:
+        return None
+    return math.pi * (diameter_mm / 1000) * ratio
+
+
+def mechanical_distance_km_from_cadence(
+    rpm: float | None,
+    duration_minutes: float | None,
+    calibration: sqlite3.Row | dict[str, Any],
+) -> float | None:
+    if rpm is None or duration_minutes is None:
+        return None
+    metres_per_revolution = distance_per_pedal_revolution_m(calibration)
+    if metres_per_revolution is None:
+        return None
+    return float(rpm) * float(duration_minutes) * metres_per_revolution / 1000
+
+
+def _calibration_float(
+    calibration: sqlite3.Row | dict[str, Any],
+    key: str,
+    default: float | None = None,
+) -> float | None:
+    try:
+        value = calibration[key]
+    except (IndexError, KeyError, TypeError):
+        value = default
+    if value is None:
+        return default
+    return float(value)
 
 
 def resistance_scale(conn: sqlite3.Connection, resistance: int | None) -> float | None:
@@ -198,8 +236,8 @@ def calculated_sprints(conn: sqlite3.Connection) -> list[CalculatedSprint]:
         calories_watts = None
         if estimated_watts is not None and hours is not None:
             calories_watts = estimated_watts * hours * 3.6
-        calibrated_distance = None
-        if row["device_distance"] is not None:
+        calibrated_distance = mechanical_distance_km_from_cadence(row["rpm"], row["duration_minutes"], calibration)
+        if calibrated_distance is None and row["device_distance"] is not None:
             calibrated_distance = float(row["device_distance"]) * length_scale
         output.append(
             CalculatedSprint(

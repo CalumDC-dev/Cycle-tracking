@@ -8,8 +8,10 @@ from workout_tracker.calculations import (
     daily_summary,
     dashboard_metrics,
     device_distance_for_length,
+    distance_per_pedal_revolution_m,
     estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
+    mechanical_distance_km_from_cadence,
     suggest_activity_classification,
     weekly_distance_summary,
 )
@@ -26,14 +28,30 @@ class CalculationTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def test_sprint_calculations_apply_resistance_and_distance_scaling(self):
+    def test_sprint_calculations_apply_resistance_and_mechanical_distance(self):
         sprint = calculated_sprints(self.conn)[0]
 
         self.assertEqual(sprint.performed_on, "2026-05-01")
         self.assertAlmostEqual(sprint.estimated_watts, 45.0)
-        self.assertAlmostEqual(sprint.calibrated_distance, 4.5)
+        self.assertAlmostEqual(sprint.calibrated_distance, 4.9197340955)
         self.assertAlmostEqual(sprint.calories_watts, 27.0)
         self.assertAlmostEqual(sprint.calories_mets, 37.3333333333)
+
+    def test_sprint_distance_falls_back_to_raw_scale_without_cadence(self):
+        cursor = self.conn.execute(
+            """
+            INSERT INTO sprint_entries (
+                performed_on, sprint_index, duration_minutes,
+                device_watts, hr, resistance, device_distance
+            )
+            VALUES ('2026-05-02', 2, 10, 300, 120, 4, 10)
+            """
+        )
+        self.conn.commit()
+
+        sprint = next(row for row in calculated_sprints(self.conn) if row.id == cursor.lastrowid)
+
+        self.assertAlmostEqual(sprint.calibrated_distance, 4.5)
 
     def test_lap_calculations_apply_circuit_length_and_met_lookup(self):
         lap = calculated_laps(self.conn)[0]
@@ -46,6 +64,19 @@ class CalculationTests(unittest.TestCase):
     def test_device_distance_for_length_uses_length_scale(self):
         self.assertAlmostEqual(device_distance_for_length(1.5, 0.45), 3.3333333333)
         self.assertIsNone(device_distance_for_length(1.5, 0))
+
+    def test_manufacturer_distance_per_pedal_revolution(self):
+        distance_per_rev = distance_per_pedal_revolution_m(
+            {"pedal_to_flywheel_ratio": 8.7, "flywheel_diameter_mm": 150.0}
+        )
+        distance = mechanical_distance_km_from_cadence(
+            60,
+            10,
+            {"pedal_to_flywheel_ratio": 8.7, "flywheel_diameter_mm": 150.0},
+        )
+
+        self.assertAlmostEqual(distance_per_rev, 4.0997784129)
+        self.assertAlmostEqual(distance, 2.4598670478)
 
     def test_estimated_watts_from_hr_uses_met_and_mass(self):
         watts = estimated_watts_from_hr(self.conn, 130, 80)
@@ -64,7 +95,7 @@ class CalculationTests(unittest.TestCase):
         row = summary[0]
         self.assertEqual(row["sprint_count"], 1)
         self.assertEqual(row["lap_count"], 1)
-        self.assertAlmostEqual(row["total_distance"], 6.0)
+        self.assertAlmostEqual(row["total_distance"], 6.4197340955)
         self.assertAlmostEqual(row["sprint_calories"], 37.3333333333)
         self.assertAlmostEqual(row["lap_calories"], 12.8)
         self.assertAlmostEqual(row["total_calories"], 50.1333333333)
@@ -100,8 +131,8 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(metrics["best_lap_circuit"], "Test Circuit")
         self.assertEqual(metrics["best_laps_by_circuit"][0]["circuit_name"], "Test Circuit")
         self.assertAlmostEqual(metrics["mass_change"], -1.0)
-        self.assertAlmostEqual(metrics["weekly_distance"][0]["distance_km"], 6.0)
-        self.assertAlmostEqual(metrics["weekly_distance"][0]["distance_miles"], 3.7282271534)
+        self.assertAlmostEqual(metrics["weekly_distance"][0]["distance_km"], 6.4197340955)
+        self.assertAlmostEqual(metrics["weekly_distance"][0]["distance_miles"], 3.9890378288)
 
     def test_best_laps_by_circuit_keeps_each_circuit_separate(self):
         self.conn.execute(
