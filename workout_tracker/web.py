@@ -708,8 +708,7 @@ def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = No
     all_laps = latest_first(calculated_laps(conn))
     filtered_sprints = filter_entries(all_sprints, filters, "sprint")
     filtered_laps = filter_entries(all_laps, filters, "lap")
-    sprints = limit_entries(filtered_sprints, filters)
-    laps = limit_entries(filtered_laps, filters)
+    sprints, laps = limit_entry_sets(filtered_sprints, filtered_laps, filters)
     circuits = circuit_rows_with_goals(conn)
     show_sprints = filters["entry_type"] in ("all", "sprint")
     show_laps = filters["entry_type"] in ("all", "lap")
@@ -775,9 +774,9 @@ def normalize_entry_filters(filters: dict[str, str]) -> dict[str, str]:
     entry_type = filters.get("entry_type", "all")
     if entry_type not in ("all", "sprint", "lap"):
         entry_type = "all"
-    limit = filters.get("limit", "25")
-    if limit not in ("25", "50", "all"):
-        limit = "25"
+    limit = filters.get("limit", "10")
+    if limit not in ("10", "25", "50", "all"):
+        limit = "10"
     return {
         "from": filters.get("from", "").strip(),
         "to": filters.get("to", "").strip(),
@@ -833,6 +832,7 @@ def entry_limit_options(current: str) -> str:
     return "".join(
         filter_option(value, label, current)
         for value, label in [
+            ("10", "Latest 10"),
             ("25", "Latest 25"),
             ("50", "Latest 50"),
             ("all", "Show all"),
@@ -910,10 +910,26 @@ def entry_needs_attention(entry: object, entry_type: str) -> bool:
     )
 
 
-def limit_entries(entries: list[object], filters: dict[str, str]) -> list[object]:
+def limit_entry_sets(
+    sprints: list[object],
+    laps: list[object],
+    filters: dict[str, str],
+) -> tuple[list[object], list[object]]:
     if filters["limit"] == "all":
-        return entries
-    return entries[: int(filters["limit"])]
+        return sprints, laps
+    limit = int(filters["limit"])
+    if filters["entry_type"] == "sprint":
+        return sprints[:limit], []
+    if filters["entry_type"] == "lap":
+        return [], laps[:limit]
+    selected = sorted(
+        [("sprint", sprint) for sprint in sprints] + [("lap", lap) for lap in laps],
+        key=lambda item: entry_sort_key(item[1]) + (item[0],),
+        reverse=True,
+    )[:limit]
+    sprint_ids = {entry.id for entry_type, entry in selected if entry_type == "sprint"}
+    lap_ids = {entry.id for entry_type, entry in selected if entry_type == "lap"}
+    return [sprint for sprint in sprints if sprint.id in sprint_ids], [lap for lap in laps if lap.id in lap_ids]
 
 
 def entry_filter_summary(
@@ -1145,6 +1161,7 @@ def render_insights(conn: sqlite3.Connection) -> str:
     source_rows = source_metric_rows(conn)
     source_by_resistance = source_performance_by_resistance(source_rows)
     source_quality = source_quality_rows(source_rows)
+    split_rows = fit_split_insight_rows(conn)
     weekly_rows = weekly_distance_summary(daily_summary(conn))
     circuit_rows = circuit_progress_rows(laps)
     strength_rows = strength_signal_rows(sprints, laps)
@@ -1194,6 +1211,7 @@ def render_insights(conn: sqlite3.Connection) -> str:
             {metric("Best avg est watts", fmt_num(max_metric(source_rows, "average_watts"), 0), "amber")}
             {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
             {metric("Threshold proxy", threshold_value_label(threshold), "green")}
+            {metric("With FIT splits", len(split_rows), "blue")}
             {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
             {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
           </div>
@@ -1223,6 +1241,10 @@ def render_insights(conn: sqlite3.Connection) -> str:
         <div class="panel-block">
           <h3>Source Performance By Resistance</h3>
           {source_resistance_table(source_by_resistance)}
+        </div>
+        <div class="panel-block">
+          <h3>FIT Split Insights</h3>
+          {fit_split_insights_table(split_rows)}
         </div>
         <div class="panel-block">
           <h3>Recent Source Metrics</h3>
@@ -2193,6 +2215,14 @@ def source_metric_summary(row: sqlite3.Row) -> str:
         pieces.append(f"speed avg {fmt_num(payload.get('average_speed_mps'), 1)} m/s")
     if payload.get("calories") is not None:
         pieces.append(f"source calories {fmt_num(payload.get('calories'), 0)}")
+    split_summary = fit_split_summary(payload)
+    if split_summary:
+        pieces.append(
+            f"{split_summary['split_count']} FIT splits; "
+            f"{split_summary['full_split_count']} full x {fmt_split_distance(split_summary['target_distance_m'])}"
+        )
+        if split_summary["partial_final_split"]:
+            pieces.append("final split partial")
     return escape("; ".join(pieces))
 
 
@@ -2426,6 +2456,222 @@ def source_highlights_table(rows: list[dict[str, object]]) -> str:
             row.get("resistance", ""),
         ])
     return table(["Metric", "Value", "Start", "Type", "Circuit", "Resistance"], highlights)
+
+
+def fit_split_insight_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT id, source, source_activity_id, title, started_on, session_type, raw_payload
+        FROM raw_activities
+        WHERE raw_payload IS NOT NULL AND raw_payload != ''
+        ORDER BY COALESCE(started_on, imported_at) DESC, id DESC
+        """
+    ).fetchall()
+    output = []
+    for row in rows:
+        summary = fit_split_summary(payload_from_text(row["raw_payload"]))
+        if not summary:
+            continue
+        output.append({
+            "id": row["id"],
+            "source": row["source"],
+            "source_activity_id": row["source_activity_id"],
+            "title": row["title"] or row["source_activity_id"] or f"Raw activity {row['id']}",
+            "started_on": row["started_on"],
+            "session_type": row["session_type"],
+            **summary,
+        })
+        if len(output) >= limit:
+            break
+    return output
+
+
+def fit_split_summary(payload: dict[str, object]) -> dict[str, object]:
+    laps = fit_split_laps(payload)
+    if len(laps) < 2:
+        return {}
+    distances = [float(lap["distance_m"]) for lap in laps if lap["distance_m"] is not None and float(lap["distance_m"]) > 0]
+    durations = [float(lap["duration_seconds"]) for lap in laps if lap["duration_seconds"] is not None and float(lap["duration_seconds"]) > 0]
+    if not distances or not durations:
+        return {}
+    target_distance = typical_split_distance(distances)
+    full_laps = [
+        lap for lap in laps
+        if is_full_split(lap.get("distance_m"), target_distance) and lap.get("duration_seconds") is not None
+    ]
+    full_durations = [float(lap["duration_seconds"]) for lap in full_laps]
+    if not full_durations:
+        full_durations = durations
+    pacing_delta = split_pacing_delta_seconds(full_durations)
+    final_lap = laps[-1]
+    partial_final = (
+        target_distance is not None
+        and final_lap.get("distance_m") is not None
+        and not is_full_split(final_lap.get("distance_m"), target_distance)
+    )
+    return {
+        "split_count": len(laps),
+        "full_split_count": len(full_laps),
+        "target_distance_m": target_distance,
+        "average_full_split_seconds": average_value(full_durations),
+        "best_full_split_seconds": min(full_durations) if full_durations else None,
+        "slowest_full_split_seconds": max(full_durations) if full_durations else None,
+        "split_variability_pct": variability_pct(full_durations),
+        "first_half_average_seconds": split_half_average(full_durations, first=True),
+        "second_half_average_seconds": split_half_average(full_durations, first=False),
+        "pacing_delta_seconds": pacing_delta,
+        "partial_final_split": partial_final,
+        "final_split_distance_m": final_lap.get("distance_m"),
+        "total_split_distance_m": sum(distances),
+    }
+
+
+def fit_split_laps(payload: dict[str, object]) -> list[dict[str, object]]:
+    raw_laps = payload.get("laps")
+    if not isinstance(raw_laps, list):
+        return []
+    laps = []
+    for index, raw_lap in enumerate(raw_laps, 1):
+        if not isinstance(raw_lap, dict):
+            continue
+        distance_m = safe_float(raw_lap.get("distance_m"))
+        duration_seconds = safe_float(raw_lap.get("duration_seconds"))
+        if distance_m is None and duration_seconds is None:
+            continue
+        laps.append({
+            "index": index,
+            "distance_m": distance_m,
+            "duration_seconds": duration_seconds,
+            "start_time": raw_lap.get("start_time"),
+            "average_watts": safe_float(raw_lap.get("average_watts")),
+            "average_cadence": safe_float(raw_lap.get("average_cadence")),
+            "average_hr": safe_float(raw_lap.get("average_hr")),
+        })
+    return laps
+
+
+def typical_split_distance(distances: list[float]) -> float | None:
+    if not distances:
+        return None
+    ordered = sorted(distances)
+    if len(ordered) < 3:
+        candidate = max(ordered)
+        return snapped_split_distance(candidate)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        candidate = ordered[middle]
+    else:
+        candidate = (ordered[middle - 1] + ordered[middle]) / 2
+    return snapped_split_distance(candidate)
+
+
+def snapped_split_distance(value: float) -> float:
+    for preset in (1000, 2000, 5000, 10000):
+        if abs(value - preset) / preset <= 0.03:
+            return float(preset)
+    return value
+
+
+def is_full_split(distance_m: object, target_distance_m: float | None) -> bool:
+    distance = safe_float(distance_m)
+    if distance is None or target_distance_m is None or target_distance_m <= 0:
+        return False
+    return distance >= target_distance_m * 0.9
+
+
+def split_half_average(values: list[float], *, first: bool) -> float | None:
+    if len(values) < 2:
+        return None
+    midpoint = len(values) // 2
+    selected = values[:midpoint] if first else values[midpoint:]
+    return average_value(selected)
+
+
+def split_pacing_delta_seconds(values: list[float]) -> float | None:
+    first = split_half_average(values, first=True)
+    second = split_half_average(values, first=False)
+    if first is None or second is None:
+        return None
+    return second - first
+
+
+def variability_pct(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    average = average_value(values)
+    if average in (None, 0):
+        return None
+    variance = sum((value - average) ** 2 for value in values) / len(values)
+    return (variance ** 0.5) / average * 100
+
+
+def fit_split_insights_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["Start", "Session", "Splits", "Preset", "Avg full", "Best full", "Slowest", "Variation", "2nd half", "Final"],
+        [
+            [
+                fmt_datetime(row["started_on"]),
+                row["title"],
+                f"{row['split_count']} total / {row['full_split_count']} full",
+                fmt_split_distance(row["target_distance_m"]),
+                fmt_seconds_duration(row["average_full_split_seconds"]),
+                fmt_seconds_duration(row["best_full_split_seconds"]),
+                fmt_seconds_duration(row["slowest_full_split_seconds"]),
+                fmt_split_percent(row["split_variability_pct"]),
+                split_pacing_label(row["pacing_delta_seconds"]),
+                final_split_label(row),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def fmt_split_distance(value: object) -> str:
+    distance_m = safe_float(value)
+    if distance_m is None:
+        return ""
+    if distance_m >= 1000:
+        return f"{fmt_num(distance_m / 1000, 2)} km"
+    return f"{fmt_num(distance_m, 0)} m"
+
+
+def fmt_seconds_duration(value: object) -> str:
+    seconds = safe_float(value)
+    if seconds is None:
+        return ""
+    return fmt_minutes(seconds / 60)
+
+
+def fmt_split_percent(value: object) -> str:
+    percent = safe_float(value)
+    if percent is None:
+        return ""
+    return f"{fmt_num(percent, 1)}%"
+
+
+def split_pacing_label(value: object) -> str:
+    delta = safe_float(value)
+    if delta is None:
+        return ""
+    if abs(delta) < 1:
+        return "Even"
+    direction = "slower" if delta > 0 else "faster"
+    return f"{fmt_seconds_duration(abs(delta))} {direction}"
+
+
+def final_split_label(row: dict[str, object]) -> str:
+    if row.get("partial_final_split"):
+        return f"Partial {fmt_split_distance(row.get('final_split_distance_m'))}"
+    return "Complete"
+
+
+def safe_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def insight_tabs(
