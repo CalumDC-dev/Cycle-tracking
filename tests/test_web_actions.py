@@ -22,6 +22,8 @@ from workout_tracker.web import (
     delete_entry,
     dismiss_duplicate_pair,
     find_activity_duplicate,
+    fit_split_insight_rows,
+    fit_split_summary,
     fit_calibration_source_rows,
     grouped_table,
     import_activity_file_to_review,
@@ -32,6 +34,7 @@ from workout_tracker.web import (
     render_entries,
     render_calibration,
     render_maintenance,
+    render_review,
     review_actions,
     calibration_coverage_rows,
     circuit_progress_rows,
@@ -270,14 +273,51 @@ class WebActionTests(unittest.TestCase):
             )
 
         html = render_entries(self.conn)
+        latest_25_html = render_entries(self.conn, {"limit": "25"})
         all_html = render_entries(self.conn, {"limit": "all"})
 
         self.assertIn("Entry Filters", html)
-        self.assertIn("Latest 25", html)
-        self.assertEqual(html.count('/entries/sprint/update'), 25)
+        self.assertIn("Latest 10", html)
+        self.assertEqual(html.count('/entries/sprint/update'), 10)
+        self.assertEqual(latest_25_html.count('/entries/sprint/update'), 25)
         self.assertEqual(all_html.count('/entries/sprint/update'), 30)
         self.assertIn('value="2026-05-30"', html)
+        self.assertNotIn('value="2026-05-20"', html)
         self.assertNotIn('value="2026-05-01"', html)
+
+    def test_render_entries_default_limit_is_combined_across_entry_types(self):
+        for index in range(8):
+            add_sprint_entry(
+                self.conn,
+                {
+                    "performed_on": f"2026-05-{index + 1:02d}",
+                    "sprint_index": str(index + 1),
+                    "duration_minutes": "5",
+                    "hr": "120",
+                    "resistance": "4",
+                },
+            )
+        for index in range(8):
+            add_lap_entry(
+                self.conn,
+                {
+                    "performed_on": f"2026-05-{index + 9:02d}",
+                    "lap_index": str(index + 1),
+                    "circuit_id": "1",
+                    "lap_time_minutes": "4",
+                    "hr": "120",
+                    "resistance": "4",
+                },
+            )
+
+        html = render_entries(self.conn)
+
+        self.assertEqual(html.count('/entries/sprint/update') + html.count('/entries/lap/update'), 10)
+        self.assertEqual(html.count('/entries/lap/update'), 8)
+        self.assertEqual(html.count('/entries/sprint/update'), 2)
+        self.assertIn('value="2026-05-16"', html)
+        self.assertIn('value="2026-05-08"', html)
+        self.assertNotIn('value="2026-05-06"', html)
 
     def test_render_entries_can_filter_by_type_circuit_resistance_and_missing(self):
         add_sprint_entry(
@@ -602,6 +642,49 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("chart-large", html)
         self.assertIn('viewBox="0 0 1000 667"', html)
         self.assertIn("chart-grid-line", html)
+
+    def test_fit_split_rows_surface_review_and_insight_visibility(self):
+        payload = {
+            "format": "fit",
+            "average_watts": 300,
+            "max_watts": 350,
+            "average_cadence": 120,
+            "laps": [
+                {"distance_m": 1000, "duration_seconds": 70, "start_time": "2026-05-21T08:36:00Z"},
+                {"distance_m": 1000, "duration_seconds": 65, "start_time": "2026-05-21T08:37:10Z"},
+                {"distance_m": 500, "duration_seconds": 30, "start_time": "2026-05-21T08:38:15Z"},
+            ],
+        }
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "fit-splits",
+                "title": "SpeedCycle split test",
+                "started_on": "2026-05-21T08:36:00Z",
+                "duration_seconds": "165",
+                "raw_distance": "2.5",
+                "raw_payload": json.dumps(payload),
+            },
+        )
+
+        summary = fit_split_summary(payload)
+        rows = fit_split_insight_rows(self.conn)
+        review_html = render_review(self.conn)
+        insights_html = render_insights(self.conn)
+
+        self.assertEqual(summary["split_count"], 3)
+        self.assertEqual(summary["full_split_count"], 2)
+        self.assertTrue(summary["partial_final_split"])
+        self.assertAlmostEqual(summary["best_full_split_seconds"], 65)
+        self.assertAlmostEqual(summary["pacing_delta_seconds"], -5)
+        self.assertEqual(rows[0]["title"], "SpeedCycle split test")
+        self.assertIn("3 FIT splits; 2 full x 1.00 km", review_html)
+        self.assertIn("final split partial", review_html)
+        self.assertIn("FIT Split Insights", insights_html)
+        self.assertIn("3 total / 2 full", insights_html)
+        self.assertIn("0:05 faster", insights_html)
+        self.assertIn("Partial 500 m", insights_html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)
