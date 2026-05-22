@@ -28,6 +28,7 @@ from .calculations import (
     estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
     mass_for_date,
+    mechanical_distance_km_from_cadence,
     resistance_scale,
     suggest_activity_classification,
     weekly_distance_summary,
@@ -738,7 +739,7 @@ def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = No
     <label>Start time<input name="started_at" type="time"></label>
     <label>Lap number<input name="lap_index" type="number" min="1"></label>
     <label>Circuit<select name="circuit_id" required id="lap-circuit">{circuit_select_options(circuits)}</select></label>
-    <label>Kinomap goal<input id="lap-goal" readonly></label>
+    <label>Raw display target<input id="lap-goal" readonly></label>
     <label>Lap time<input name="lap_time_minutes" placeholder="1:30"></label>
     <label>HR<input name="hr" type="number" min="0"></label>
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
@@ -1049,6 +1050,8 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
 
 def render_circuits(conn: sqlite3.Connection) -> str:
     rows = circuit_rows_with_goals(conn, include_inactive=True)
+    active_rows = [row for row in rows if row["active"]]
+    raw_display_ratio = observed_raw_display_ratio(conn)
     body = []
     for row in rows:
         checked = "checked" if row["active"] else ""
@@ -1057,7 +1060,7 @@ def render_circuits(conn: sqlite3.Connection) -> str:
   <input type="hidden" name="id" value="{row['id']}">
   <input name="name" value="{escape(str(row['name']))}" aria-label="Circuit name">
   <input name="length" value="{fmt_raw(row['length'])}" aria-label="Length">
-  <input value="{fmt_raw(row['calculated_device_distance'])}" aria-label="Kinomap goal" readonly>
+  <input value="{fmt_raw(row['legacy_kinomap_goal'])}" aria-label="Legacy Kinomap goal" readonly>
   <label><span>Active</span><input type="checkbox" name="active" value="1" {checked}></label>
   <button type="submit">Save</button>
 </form>""")
@@ -1071,8 +1074,15 @@ def render_circuits(conn: sqlite3.Connection) -> str:
   </form>
 </section>
 <section class="band">
+  <h2>Circuit Session Targets</h2>
+  <div class="muted" style="margin-bottom:12px;">
+    Pedal-revolution and time targets use the manufacturer model. Estimated raw display target uses imported sprint history to approximate what SpeedCycle or Strava may show for the same mechanical distance.
+  </div>
+  {circuit_target_table(active_rows, raw_display_ratio)}
+</section>
+<section class="band">
   <h2>Circuits</h2>
-  <div class="muted">Kinomap goal is calculated from real circuit length divided by the raw app distance scale.</div>
+  <div class="muted">Legacy Kinomap goal is calculated from real circuit length divided by the raw app distance scale.</div>
   <div style="display:grid; gap:8px; margin-top:12px;">{''.join(body)}</div>
 </section>
 """
@@ -2679,6 +2689,14 @@ def safe_float(value: object) -> float | None:
         return None
 
 
+def first_payload_float(payload: dict[str, object], *keys: str) -> float | None:
+    for key in keys:
+        value = safe_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def insight_tabs(
     *,
     overview: str,
@@ -3280,6 +3298,39 @@ def weekly_distance_table(rows: list[dict[str, object]]) -> str:
             for row in rows
         ],
     )
+
+
+def circuit_target_table(rows: list[dict[str, object]], raw_display_ratio: float | None) -> str:
+    target_note_html = ""
+    if raw_display_ratio is not None:
+        target_note = f"Observed raw display factor: {fmt_num(raw_display_ratio, 3)} x manufacturer distance."
+        target_note_html = f'<div class="muted" style="margin-bottom:10px;">{escape(target_note)}</div>'
+    target_table = table(
+        [
+            "Circuit",
+            "Length km",
+            "Pedal revs",
+            "Time @ 60 RPM",
+            "Time @ 90 RPM",
+            "Time @ 120 RPM",
+            "Raw display target",
+            "Legacy Kinomap goal",
+        ],
+        [
+            [
+                row["name"],
+                fmt_num(row["length"], 3),
+                fmt_num(row["pedal_revolutions"], 0),
+                fmt_minutes(row["target_time_60_rpm"]),
+                fmt_minutes(row["target_time_90_rpm"]),
+                fmt_minutes(row["target_time_120_rpm"]),
+                fmt_num(row["estimated_raw_display_target"], 3),
+                fmt_num(row["legacy_kinomap_goal"], 3),
+            ]
+            for row in rows
+        ],
+    )
+    return f'{target_note_html}<div class="table-scroll">{target_table}</div>'
 
 
 def distance_km_miles(row: dict[str, object] | None) -> str:
@@ -3924,7 +3975,14 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     duration_seconds = maybe_int(params.get("duration_seconds"))
     hr = maybe_int(params.get("hr"))
     raw_payload = empty_to_none(params.get("raw_payload"))
-    suggestion = suggest_activity_classification(conn, raw_distance)
+    payload = payload_from_text(raw_payload)
+    average_cadence = first_payload_float(payload, "average_cadence", "csv_average_cadence")
+    suggestion = suggest_activity_classification(
+        conn,
+        raw_distance,
+        duration_seconds=duration_seconds,
+        average_cadence=average_cadence,
+    )
     duplicate = find_activity_duplicate(
         conn,
         started_on=started_on,
@@ -4796,15 +4854,68 @@ def update_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
 def circuit_rows_with_goals(conn: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, object]]:
     profile = editable_calibration_profile(conn)
     length_scale = float(profile["length_scale"])
+    metres_per_pedal_revolution = distance_per_pedal_revolution_m(profile)
+    raw_display_ratio = observed_raw_display_ratio(conn)
     where = "" if include_inactive else "WHERE active = 1"
     rows = conn.execute(f"SELECT * FROM circuits {where} ORDER BY name").fetchall()
-    return [
-        {
-            **dict(row),
-            "calculated_device_distance": device_distance_for_length(row["length"], length_scale),
-        }
-        for row in rows
-    ]
+    output = []
+    for row in rows:
+        length = maybe_float(str(row["length"])) if row["length"] is not None else None
+        legacy_goal = device_distance_for_length(length, length_scale)
+        pedal_revolutions = pedal_revolutions_for_length(length, metres_per_pedal_revolution)
+        estimated_raw_display_target = length * raw_display_ratio if length is not None and raw_display_ratio else None
+        output.append(
+            {
+                **dict(row),
+                "calculated_device_distance": legacy_goal,
+                "legacy_kinomap_goal": legacy_goal,
+                "pedal_revolutions": pedal_revolutions,
+                "estimated_raw_display_target": estimated_raw_display_target,
+                "target_time_60_rpm": target_minutes_for_cadence(pedal_revolutions, 60),
+                "target_time_90_rpm": target_minutes_for_cadence(pedal_revolutions, 90),
+                "target_time_120_rpm": target_minutes_for_cadence(pedal_revolutions, 120),
+            }
+        )
+    return output
+
+
+def pedal_revolutions_for_length(length_km: float | None, metres_per_pedal_revolution: float | None) -> float | None:
+    if length_km is None or metres_per_pedal_revolution in (None, 0):
+        return None
+    return float(length_km) * 1000 / float(metres_per_pedal_revolution)
+
+
+def target_minutes_for_cadence(pedal_revolutions: float | None, cadence_rpm: float) -> float | None:
+    if pedal_revolutions is None or cadence_rpm <= 0:
+        return None
+    return pedal_revolutions / cadence_rpm
+
+
+def observed_raw_display_ratio(conn: sqlite3.Connection) -> float | None:
+    profile = editable_calibration_profile(conn)
+    raw_total = 0.0
+    mechanical_total = 0.0
+    rows = conn.execute(
+        """
+        SELECT rpm, duration_minutes, device_distance
+        FROM sprint_entries
+        WHERE rpm IS NOT NULL
+          AND duration_minutes IS NOT NULL
+          AND device_distance IS NOT NULL
+          AND rpm > 0
+          AND duration_minutes > 0
+          AND device_distance > 0
+        """
+    ).fetchall()
+    for row in rows:
+        mechanical_distance = mechanical_distance_km_from_cadence(row["rpm"], row["duration_minutes"], profile)
+        if mechanical_distance is None or mechanical_distance <= 0:
+            continue
+        raw_total += float(row["device_distance"])
+        mechanical_total += mechanical_distance
+    if mechanical_total <= 0:
+        return None
+    return raw_total / mechanical_total
 
 
 def circuit_select_options(circuits: list[dict[str, object]] | list[sqlite3.Row], selected_id: int | None = None) -> str:
@@ -4812,6 +4923,8 @@ def circuit_select_options(circuits: list[dict[str, object]] | list[sqlite3.Row]
     for circuit in circuits:
         selected = " selected" if selected_id == circuit["id"] else ""
         goal = circuit.get("calculated_device_distance") if isinstance(circuit, dict) else None
+        if isinstance(circuit, dict) and circuit.get("estimated_raw_display_target") is not None:
+            goal = circuit.get("estimated_raw_display_target")
         data_goal = f' data-goal="{fmt_raw(goal)}"' if goal is not None else ""
         options.append(f'<option value="{circuit["id"]}"{selected}{data_goal}>{escape(str(circuit["name"]))}</option>')
     return "".join(options)
