@@ -23,6 +23,7 @@ from .calculations import (
     calculated_sprints,
     dashboard_metrics,
     daily_summary,
+    distance_per_pedal_revolution_m,
     device_distance_for_length,
     estimated_mechanical_watts_from_hr,
     estimated_watts_from_hr,
@@ -1006,7 +1007,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
             "HR",
             "Resistance",
             "Device distance",
-            "Cal distance",
+            "Normalised distance",
             "Calories (HR/MET)",
             "",
         ],
@@ -1071,7 +1072,7 @@ def render_circuits(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Circuits</h2>
-  <div class="muted">Kinomap goal is calculated from real circuit length divided by the active length scale.</div>
+  <div class="muted">Kinomap goal is calculated from real circuit length divided by the raw app distance scale.</div>
   <div style="display:grid; gap:8px; margin-top:12px;">{''.join(body)}</div>
 </section>
 """
@@ -1080,6 +1081,7 @@ def render_circuits(conn: sqlite3.Connection) -> str:
 def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | None = None) -> str:
     refresh_interpolated_resistance_scaling(conn)
     profile = editable_calibration_profile(conn)
+    metres_per_pedal_revolution = distance_per_pedal_revolution_m(profile)
     resistance_rows = resistance_scaling_rows(conn)
     mass_rows = conn.execute("SELECT id, measured_on, mass_kg FROM mass_log ORDER BY measured_on DESC").fetchall()
     current_mass_kg = latest_mass_kg(conn)
@@ -1098,11 +1100,14 @@ def render_calibration(conn: sqlite3.Connection, preview: dict[str, object] | No
   <form class="stack" method="post" action="/calibration/profile/update">
     <input type="hidden" name="id" value="{profile['id']}">
     <label>Name<input name="name" value="{escape(str(profile['name']))}" required></label>
-    <label>Length scale<input name="length_scale" type="number" step="0.000001" min="0" value="{fmt_raw(profile['length_scale'])}" required></label>
-    <label>Distance per stroke<input name="distance_per_stroke" type="number" step="0.000001" min="0" value="{fmt_raw(profile['distance_per_stroke'])}"></label>
+    <label>Raw app distance scale<input name="length_scale" type="number" step="0.000001" min="0" value="{fmt_raw(profile['length_scale'])}" required></label>
+    <label>Pedal-to-flywheel ratio<input name="pedal_to_flywheel_ratio" type="number" step="0.001" min="0" value="{fmt_raw(profile['pedal_to_flywheel_ratio'])}" required></label>
+    <label>Flywheel diameter mm<input name="flywheel_diameter_mm" type="number" step="0.001" min="0" value="{fmt_raw(profile['flywheel_diameter_mm'])}" required></label>
+    <label>Metres per pedal revolution<input value="{fmt_num(metres_per_pedal_revolution, 3)}" readonly></label>
     <label>Mechanical efficiency<input name="mechanical_efficiency" type="number" step="0.001" min="0" max="1" value="{fmt_raw(profile['mechanical_efficiency'])}" required></label>
     <button type="submit">Save constants</button>
   </form>
+  <div class="muted" style="margin-top:10px;">Sprint distance uses cadence, duration, flywheel diameter, and transmission ratio when available. Raw app distance scale is kept as the fallback and Kinomap goal helper.</div>
 </section>
 <section class="band">
   <h2>Performance Resistance Scaling</h2>
@@ -4451,8 +4456,11 @@ def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
     if profile is None:
         conn.execute(
             """
-            INSERT INTO calibration_profiles (name, length_scale, distance_per_stroke, mechanical_efficiency, active)
-            VALUES ('Default under-desk bike', 0.45, NULL, 0.22, 1)
+            INSERT INTO calibration_profiles (
+                name, length_scale, distance_per_stroke, mechanical_efficiency,
+                pedal_to_flywheel_ratio, flywheel_diameter_mm, active
+            )
+            VALUES ('Default under-desk bike', 0.45, NULL, 0.22, 8.7, 150.0, 1)
             """
         )
         conn.commit()
@@ -4462,17 +4470,35 @@ def editable_calibration_profile(conn: sqlite3.Connection) -> sqlite3.Row:
 
 def update_calibration_profile(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     profile_id = int(required(params, "id"))
+    pedal_to_flywheel_ratio = float(required(params, "pedal_to_flywheel_ratio"))
+    flywheel_diameter_mm = float(required(params, "flywheel_diameter_mm"))
+    if pedal_to_flywheel_ratio <= 0 or flywheel_diameter_mm <= 0:
+        raise ValueError("Pedal-to-flywheel ratio and flywheel diameter must be positive.")
+    distance_per_stroke = distance_per_pedal_revolution_m(
+        {
+            "pedal_to_flywheel_ratio": pedal_to_flywheel_ratio,
+            "flywheel_diameter_mm": flywheel_diameter_mm,
+        }
+    )
     conn.execute(
         """
         UPDATE calibration_profiles
-        SET name = ?, length_scale = ?, distance_per_stroke = ?, mechanical_efficiency = ?, active = 1
+        SET name = ?,
+            length_scale = ?,
+            distance_per_stroke = ?,
+            mechanical_efficiency = ?,
+            pedal_to_flywheel_ratio = ?,
+            flywheel_diameter_mm = ?,
+            active = 1
         WHERE id = ?
         """,
         (
             required(params, "name"),
             float(required(params, "length_scale")),
-            maybe_float(params.get("distance_per_stroke")),
+            distance_per_stroke,
             mechanical_efficiency_value(params.get("mechanical_efficiency")),
+            pedal_to_flywheel_ratio,
+            flywheel_diameter_mm,
             profile_id,
         ),
     )

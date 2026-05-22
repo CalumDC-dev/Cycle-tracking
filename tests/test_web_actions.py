@@ -111,7 +111,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(sprint.performed_on, "2026-05-02")
         self.assertEqual(sprint.started_at, "2026-05-02T07:30")
         self.assertAlmostEqual(sprint.estimated_watts, 50.0)
-        self.assertAlmostEqual(sprint.calibrated_distance, 4.0)
+        self.assertAlmostEqual(sprint.calibrated_distance, 2.6648559684)
 
     def test_add_lap_entry_requires_circuit_and_calculates_speed(self):
         add_lap_entry(
@@ -724,7 +724,8 @@ class WebActionTests(unittest.TestCase):
                 "id": "1",
                 "name": "Updated",
                 "length_scale": "0.42",
-                "distance_per_stroke": "2.1",
+                "pedal_to_flywheel_ratio": "8.7",
+                "flywheel_diameter_mm": "150",
                 "mechanical_efficiency": "0.23",
             },
         )
@@ -732,7 +733,9 @@ class WebActionTests(unittest.TestCase):
         profile = editable_calibration_profile(self.conn)
         self.assertEqual(profile["name"], "Updated")
         self.assertAlmostEqual(profile["length_scale"], 0.42)
-        self.assertAlmostEqual(profile["distance_per_stroke"], 2.1)
+        self.assertAlmostEqual(profile["pedal_to_flywheel_ratio"], 8.7)
+        self.assertAlmostEqual(profile["flywheel_diameter_mm"], 150.0)
+        self.assertAlmostEqual(profile["distance_per_stroke"], 4.0997784129)
         self.assertAlmostEqual(profile["mechanical_efficiency"], 0.23)
 
     def test_update_resistance_scaling_manual_factors(self):
