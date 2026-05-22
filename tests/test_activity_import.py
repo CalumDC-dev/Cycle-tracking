@@ -248,6 +248,15 @@ class ActivityImportTests(unittest.TestCase):
         self.assertEqual(payload["record_count"], 2)
         self.assertEqual(payload["lap_count"], 2)
         self.assertEqual(payload["laps"][0]["distance_m"], 1008.98)
+        self.assertEqual(payload["laps"][0]["average_hr"], 121)
+        self.assertEqual(payload["laps"][0]["max_hr"], 129)
+        self.assertEqual(payload["laps"][0]["average_cadence"], 105)
+        self.assertEqual(payload["laps"][0]["max_cadence"], 117)
+        self.assertEqual(payload["laps"][0]["average_watts"], 260)
+        self.assertEqual(payload["laps"][0]["max_watts"], 300)
+        self.assertEqual(payload["laps"][0]["normalized_power"], 275)
+        self.assertEqual(payload["laps"][0]["average_speed_mps"], 13.452)
+        self.assertEqual(payload["laps"][0]["max_speed_mps"], 14.6)
         self.assertEqual(payload["average_watts"], 275.0)
         self.assertEqual(payload["max_watts"], 300)
         self.assertEqual(payload["average_cadence"], 110.0)
@@ -309,9 +318,65 @@ def fit_fixture() -> bytes:
                 ],
             ),
             fit_data(1, "IIBBIIIHHHBBHHH", start + 122, start, 2, 6, 122003, 122003, 167783, 42, 13752, 17422, 132, 175, 349, 458, 2),
-            fit_definition(2, 19, [(253, 4, 0x86), (2, 4, 0x86), (7, 4, 0x86), (8, 4, 0x86), (9, 4, 0x86)]),
-            fit_data(2, "IIIII", start + 75, start, 75005, 75005, 100898),
-            fit_data(2, "IIIII", start + 122, start + 75, 46998, 46998, 66885),
+            fit_definition(
+                2,
+                19,
+                [
+                    (253, 4, 0x86),
+                    (2, 4, 0x86),
+                    (7, 4, 0x86),
+                    (8, 4, 0x86),
+                    (9, 4, 0x86),
+                    (11, 2, 0x84),
+                    (13, 2, 0x84),
+                    (14, 2, 0x84),
+                    (15, 1, 0x02),
+                    (16, 1, 0x02),
+                    (17, 1, 0x02),
+                    (18, 1, 0x02),
+                    (19, 2, 0x84),
+                    (20, 2, 0x84),
+                    (33, 2, 0x84),
+                ],
+            ),
+            fit_data(
+                2,
+                "IIIIIHHHBBBBHHH",
+                start + 75,
+                start,
+                75005,
+                75005,
+                100898,
+                30,
+                13452,
+                14600,
+                121,
+                129,
+                105,
+                117,
+                260,
+                300,
+                275,
+            ),
+            fit_data(
+                2,
+                "IIIIIHHHBBBBHHH",
+                start + 122,
+                start + 75,
+                46998,
+                46998,
+                66885,
+                20,
+                14232,
+                15500,
+                125,
+                132,
+                112,
+                128,
+                285,
+                310,
+                295,
+            ),
             fit_definition(3, 20, [(253, 4, 0x86), (5, 4, 0x86), (6, 2, 0x84), (7, 2, 0x84), (4, 1, 0x02), (3, 1, 0x02)]),
             fit_data(3, "IIHHBB", start + 1, 0, 5000, 250, 100, 120),
             fit_data(3, "IIHHBB", start + 2, 1000, 7000, 300, 120, 124),
