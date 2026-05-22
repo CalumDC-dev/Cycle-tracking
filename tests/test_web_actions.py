@@ -33,6 +33,7 @@ from workout_tracker.web import (
     render_insights,
     render_entries,
     render_calibration,
+    render_circuits,
     render_maintenance,
     render_review,
     review_actions,
@@ -690,6 +691,29 @@ class WebActionTests(unittest.TestCase):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)
 
         self.assertAlmostEqual(rows[0]["calculated_device_distance"], 4.0)
+        self.assertAlmostEqual(rows[0]["legacy_kinomap_goal"], 4.0)
+        self.assertAlmostEqual(rows[0]["pedal_revolutions"], 487.8312432)
+        self.assertAlmostEqual(rows[0]["target_time_60_rpm"], 8.1305207199)
+        self.assertIsNone(rows[0]["estimated_raw_display_target"])
+
+    def test_circuit_targets_use_observed_raw_display_ratio(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-20",
+                "duration_minutes": "10",
+                "rpm": "100",
+                "device_distance": "6",
+            },
+        )
+
+        rows = circuit_rows_with_goals(self.conn, include_inactive=True)
+        html = render_circuits(self.conn)
+
+        self.assertAlmostEqual(rows[0]["estimated_raw_display_target"], 2.9269874592)
+        self.assertIn("Circuit Session Targets", html)
+        self.assertIn("Observed raw display factor", html)
+        self.assertIn("Raw display target", html)
 
     def test_circuit_add_and_update_ignore_manual_device_distance(self):
         add_circuit(
@@ -1206,6 +1230,28 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(raw["review_status"], "needs_hr")
         self.assertEqual(raw["session_type"], "lap")
         self.assertEqual(raw["circuit_id"], 1)
+
+    def test_new_raw_activity_matching_mechanical_distance_is_preclassified_as_lap(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "new-mechanical-lap-guess",
+                "started_on": "2026-05-08T07:15",
+                "duration_seconds": "293",
+                "raw_distance": "2.93",
+                "raw_payload": json.dumps({"average_cadence": 100}),
+            },
+        )
+
+        raw = self.conn.execute(
+            "SELECT * FROM raw_activities WHERE source_activity_id = ?",
+            ("new-mechanical-lap-guess",),
+        ).fetchone()
+        self.assertEqual(raw["review_status"], "needs_hr")
+        self.assertEqual(raw["session_type"], "lap")
+        self.assertEqual(raw["circuit_id"], 1)
+        self.assertIn("Manufacturer-model distance", raw["classification_reason"])
 
     def test_repeat_raw_activity_import_enriches_existing_payload_without_resetting_review(self):
         add_raw_activity(

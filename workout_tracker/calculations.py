@@ -13,6 +13,8 @@ from typing import Any
 KM_TO_MILES = 0.621371192237334
 DEFAULT_PEDAL_TO_FLYWHEEL_RATIO = 8.7
 DEFAULT_FLYWHEEL_DIAMETER_MM = 150.0
+RAW_CIRCUIT_MATCH_TOLERANCE = 0.03
+MECHANICAL_CIRCUIT_MATCH_TOLERANCE = 0.05
 
 
 @dataclass(frozen=True)
@@ -481,56 +483,105 @@ def best_laps_by_circuit(laps: list[CalculatedLap] | None = None, conn: sqlite3.
     ]
 
 
-def suggest_activity_classification(conn: sqlite3.Connection, raw_distance: float | None) -> dict[str, Any]:
-    if raw_distance is None:
-        return {"session_type": "unknown", "confidence": 0.0, "reason": "No raw distance was supplied."}
-
+def suggest_activity_classification(
+    conn: sqlite3.Connection,
+    raw_distance: float | None,
+    *,
+    duration_seconds: int | float | None = None,
+    average_cadence: float | None = None,
+) -> dict[str, Any]:
     calibration = active_calibration(conn)
     length_scale = float(calibration["length_scale"])
     circuits = conn.execute(
         "SELECT id, name, length FROM circuits WHERE active = 1 AND length IS NOT NULL"
     ).fetchall()
-    best = None
+    mechanical_distance = None
+    if duration_seconds is not None and average_cadence is not None:
+        mechanical_distance = mechanical_distance_km_from_cadence(
+            average_cadence,
+            float(duration_seconds) / 60,
+            calibration,
+        )
+
+    best_mechanical = best_circuit_match(circuits, mechanical_distance, "length")
+    if best_mechanical and best_mechanical["pct_diff"] <= MECHANICAL_CIRCUIT_MATCH_TOLERANCE:
+        return {
+            "session_type": "lap",
+            "circuit_id": best_mechanical["circuit_id"],
+            "confidence": max(0.0, 1 - best_mechanical["pct_diff"]),
+            "reason": (
+                f"Manufacturer-model distance is within {best_mechanical['pct_diff']:.1%} "
+                f"of {best_mechanical['circuit_name']} length."
+            ),
+        }
+
+    if raw_distance is None or raw_distance <= 0:
+        if mechanical_distance is not None:
+            return {
+                "session_type": "sprint",
+                "confidence": 0.4,
+                "reason": "Manufacturer-model distance did not match an active circuit, so this is treated as a free-form sprint.",
+            }
+        return {"session_type": "unknown", "confidence": 0.0, "reason": "No usable distance was supplied."}
+
+    raw_targets = []
     for circuit in circuits:
         target = device_distance_for_length(circuit["length"], length_scale)
-        if target <= 0:
+        if target is None or target <= 0:
             continue
-        pct_diff = abs(raw_distance - target) / target
-        if best is None or pct_diff < best["pct_diff"]:
-            best = {
+        raw_targets.append(
+            {
                 "circuit_id": int(circuit["id"]),
                 "circuit_name": circuit["name"],
-                "pct_diff": pct_diff,
                 "target": target,
+                "length": circuit["length"],
             }
-
-    if best and best["pct_diff"] <= 0.03:
+        )
+    best = best_circuit_match(raw_targets, raw_distance, "target")
+    if best and best["pct_diff"] <= RAW_CIRCUIT_MATCH_TOLERANCE:
         return {
             "session_type": "lap",
             "circuit_id": best["circuit_id"],
             "confidence": max(0.0, 1 - best["pct_diff"]),
             "reason": f"Raw distance is within {best['pct_diff']:.1%} of {best['circuit_name']} target.",
         }
-    if raw_distance > 0:
-        if best:
-            return {
-                "session_type": "sprint",
-                "confidence": 0.45,
-                "reason": (
-                    f"No circuit target was within 3% of the raw distance; closest was "
-                    f"{best['circuit_name']} at {best['pct_diff']:.1%} away, so this is treated as a free-form sprint."
-                ),
-            }
+    if best:
         return {
             "session_type": "sprint",
-            "confidence": 0.4,
-            "reason": "No active circuit targets exist, so this is treated as a free-form sprint.",
+            "confidence": 0.45,
+            "reason": (
+                f"No circuit target was within 3% of the raw distance; closest was "
+                f"{best['circuit_name']} at {best['pct_diff']:.1%} away, so this is treated as a free-form sprint."
+            ),
         }
     return {
-        "session_type": "unknown",
-        "confidence": 0.0,
-        "reason": "Raw distance was not usable for classification.",
+        "session_type": "sprint",
+        "confidence": 0.4,
+        "reason": "No active circuit targets exist, so this is treated as a free-form sprint.",
     }
+
+
+def best_circuit_match(
+    circuits: list[sqlite3.Row] | list[dict[str, Any]],
+    observed_distance: float | None,
+    target_key: str,
+) -> dict[str, Any] | None:
+    if observed_distance is None or observed_distance <= 0:
+        return None
+    best = None
+    for circuit in circuits:
+        target = circuit[target_key]
+        if target is None or float(target) <= 0:
+            continue
+        pct_diff = abs(float(observed_distance) - float(target)) / float(target)
+        if best is None or pct_diff < best["pct_diff"]:
+            best = {
+                "circuit_id": int(circuit["circuit_id"] if isinstance(circuit, dict) else circuit["id"]),
+                "circuit_name": circuit["circuit_name"] if isinstance(circuit, dict) else circuit["name"],
+                "pct_diff": pct_diff,
+                "target": float(target),
+            }
+    return best
 
 
 def _average(values: list[float]) -> float | None:

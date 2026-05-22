@@ -24,6 +24,7 @@ Then open `http://127.0.0.1:8000`.
 - Sprint and lap entries can be added manually from the local web UI.
 - Calibration constants, resistance scaling factors, calibration tests, and mass records can be edited from the local web UI.
 - Sprint distance uses the manufacturer-derived YBM-2 mechanical model when cadence and duration are available: pedal-to-flywheel ratio plus flywheel diameter. The raw app distance scale remains available as a fallback and Kinomap goal helper.
+- Circuit targets show manufacturer-model pedal revolutions, estimated raw display targets, and legacy Kinomap goals. Imported activities can be pre-classified as circuit laps when cadence and duration imply a circuit-length mechanical distance.
 - Strava/Kinomap import can later write into `raw_activities`; the review screen separates new items, possible duplicates, missing-HR items, and already logged history.
 - Raw activity CSV/JSON/TCX/TCX.GZ/FIT/FIT.GZ files, Strava bulk export ZIPs, or folders containing those files, can be imported into the review queue from the local UI or `import-activities` CLI command.
 - Reviewed raw activities can be imported into sprint or lap entries from the local UI, with manual HR captured before promotion.

@@ -169,6 +169,18 @@ class CalculationTests(unittest.TestCase):
         self.assertEqual(suggestion["circuit_id"], 1)
         self.assertGreater(suggestion["confidence"], 0.99)
 
+    def test_classifier_suggests_lap_when_mechanical_distance_matches_circuit(self):
+        suggestion = suggest_activity_classification(
+            self.conn,
+            2.2,
+            duration_seconds=219.5,
+            average_cadence=100,
+        )
+
+        self.assertEqual(suggestion["session_type"], "lap")
+        self.assertEqual(suggestion["circuit_id"], 1)
+        self.assertIn("Manufacturer-model distance", suggestion["reason"])
+
     def test_classifier_treats_non_matching_distance_as_free_form_sprint(self):
         suggestion = suggest_activity_classification(self.conn, 20.0)
 
