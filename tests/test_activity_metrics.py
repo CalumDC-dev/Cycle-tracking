@@ -42,6 +42,44 @@ class ActivityMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["average_source_hr"], 121.6666666667)
         self.assertIn("trailing_inactive_trimmed", metrics["data_quality_flags"])
 
+    def test_analyse_activity_samples_ignores_sustained_low_hr_dropout_during_effort(self):
+        samples = [
+            ActivitySample(elapsed_seconds=float(index), watts=240, cadence=95, speed_mps=9.0, hr=118)
+            for index in range(30)
+        ]
+        samples.extend(
+            ActivitySample(elapsed_seconds=float(index), watts=275, cadence=105, speed_mps=11.0, hr=65)
+            for index in range(30, 70)
+        )
+        samples.extend(
+            ActivitySample(elapsed_seconds=float(index), watts=300, cadence=115, speed_mps=12.0, hr=126)
+            for index in range(70, 100)
+        )
+
+        metrics = analyse_activity_samples(samples, duration_seconds=100)
+
+        self.assertAlmostEqual(metrics["average_raw_source_hr"], 99.2)
+        self.assertAlmostEqual(metrics["average_source_hr"], 122.0)
+        self.assertEqual(metrics["min_source_hr"], 118)
+        self.assertEqual(metrics["hr_dropout_sample_count"], 40)
+        self.assertAlmostEqual(metrics["hr_dropout_seconds"], 40)
+        self.assertIn("hr_dropout_suspected", metrics["data_quality_flags"])
+
+    def test_analyse_activity_samples_keeps_short_low_hr_periods(self):
+        samples = [
+            ActivitySample(elapsed_seconds=float(index), watts=220, cadence=90, speed_mps=8.0, hr=65)
+            for index in range(10)
+        ]
+        samples.extend(
+            ActivitySample(elapsed_seconds=float(index), watts=240, cadence=95, speed_mps=9.0, hr=115)
+            for index in range(10, 30)
+        )
+
+        metrics = analyse_activity_samples(samples, duration_seconds=30)
+
+        self.assertAlmostEqual(metrics["average_source_hr"], 98.3333333333)
+        self.assertNotIn("hr_dropout_suspected", metrics.get("data_quality_flags", []))
+
     def test_source_metric_rows_flattens_payload_for_export_and_dashboard(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
