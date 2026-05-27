@@ -650,10 +650,14 @@ class WebActionTests(unittest.TestCase):
             "average_watts": 300,
             "max_watts": 350,
             "average_cadence": 120,
+            "average_source_hr": 122.656,
+            "average_raw_source_hr": 113.482,
+            "hr_dropout_seconds": 306,
+            "data_quality_flags": ["hr_dropout_suspected"],
             "laps": [
-                {"distance_m": 1000, "duration_seconds": 70, "start_time": "2026-05-21T08:36:00Z"},
-                {"distance_m": 1000, "duration_seconds": 65, "start_time": "2026-05-21T08:37:10Z"},
-                {"distance_m": 500, "duration_seconds": 30, "start_time": "2026-05-21T08:38:15Z"},
+                {"distance_m": 1000, "duration_seconds": 70, "start_time": "2026-05-21T08:36:00Z", "average_hr": 120, "max_hr": 124, "average_watts": 300, "average_cadence": 120},
+                {"distance_m": 1000, "duration_seconds": 65, "start_time": "2026-05-21T08:37:10Z", "average_hr": 65, "max_hr": 65, "average_watts": 320, "average_cadence": 130},
+                {"distance_m": 500, "duration_seconds": 30, "start_time": "2026-05-21T08:38:15Z", "average_hr": 126, "max_hr": 128, "average_watts": 330, "average_cadence": 132},
             ],
         }
         add_raw_activity(
@@ -665,6 +669,7 @@ class WebActionTests(unittest.TestCase):
                 "started_on": "2026-05-21T08:36:00Z",
                 "duration_seconds": "165",
                 "raw_distance": "2.5",
+                "hr": "122.656",
                 "raw_payload": json.dumps(payload),
             },
         )
@@ -679,13 +684,19 @@ class WebActionTests(unittest.TestCase):
         self.assertTrue(summary["partial_final_split"])
         self.assertAlmostEqual(summary["best_full_split_seconds"], 65)
         self.assertAlmostEqual(summary["pacing_delta_seconds"], -5)
+        self.assertEqual(summary["hr_dropout_split_indices"], [2])
         self.assertEqual(rows[0]["title"], "SpeedCycle split test")
         self.assertIn("3 FIT splits; 2 full x 1.00 km", review_html)
         self.assertIn("final split partial", review_html)
+        self.assertIn("HR corrected: 122.7 bpm from 113.5 bpm raw; 5:06 suspected dropout", review_html)
+        self.assertIn("HR dropout splits 2", review_html)
         self.assertIn("FIT Split Insights", insights_html)
         self.assertIn("3 total / 2 full", insights_html)
         self.assertIn("0:05 faster", insights_html)
         self.assertIn("Partial 500 m", insights_html)
+        self.assertIn("HR dropouts", insights_html)
+        self.assertIn("HR dropout splits 2", insights_html)
+        self.assertIn("5:06 dropout", insights_html)
 
     def test_circuit_goal_is_calculated_from_length_scale(self):
         rows = circuit_rows_with_goals(self.conn, include_inactive=True)
