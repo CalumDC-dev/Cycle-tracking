@@ -108,7 +108,10 @@ class ActivityMetricsTests(unittest.TestCase):
                         "average_watts": 250,
                         "best_300s_watts": 245,
                         "average_cadence": 120,
-                        "data_quality_flags": ["missing_source_hr"],
+                        "average_source_hr": 122.5,
+                        "average_raw_source_hr": 113.5,
+                        "hr_dropout_seconds": 306,
+                        "data_quality_flags": ["hr_dropout_suspected"],
                     }
                 ),
             ),
@@ -123,7 +126,10 @@ class ActivityMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["average_watts"], 50)
         self.assertEqual(rows[0]["best_300s_watts"], 49)
         self.assertEqual(rows[0]["device_average_watts"], 250)
-        self.assertEqual(rows[0]["data_quality_flags"], "missing_source_hr")
+        self.assertEqual(rows[0]["average_source_hr"], 122.5)
+        self.assertEqual(rows[0]["average_raw_source_hr"], 113.5)
+        self.assertEqual(rows[0]["hr_dropout_seconds"], 306)
+        self.assertEqual(rows[0]["data_quality_flags"], "hr_dropout_suspected")
 
     def test_source_metric_rows_uses_interpolated_resistance_scaling(self):
         conn = sqlite3.connect(":memory:")

@@ -35,7 +35,16 @@ class ExporterTests(unittest.TestCase):
                 "2026-05-12T08:00:00",
                 "already_logged",
                 "sprint",
-                json.dumps({"average_watts": 250, "best_300s_watts": 240}),
+                json.dumps(
+                    {
+                        "average_watts": 250,
+                        "best_300s_watts": 240,
+                        "average_source_hr": 122.5,
+                        "average_raw_source_hr": 113.5,
+                        "hr_dropout_seconds": 306,
+                        "data_quality_flags": ["hr_dropout_suspected"],
+                    }
+                ),
             ),
         )
 
@@ -48,6 +57,9 @@ class ExporterTests(unittest.TestCase):
 
         self.assertIn(source_file, files)
         self.assertIn("average_watts", text)
+        self.assertIn("average_raw_source_hr", text)
+        self.assertIn("hr_dropout_seconds", text)
+        self.assertIn("hr_dropout_suspected", text)
         self.assertIn("250", text)
 
     def test_backup_bundle_includes_sqlite_snapshot_and_core_csvs(self):

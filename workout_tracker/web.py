@@ -17,7 +17,13 @@ import json
 import sqlite3
 
 from .activity_import import load_activity_file
-from .activity_metrics import source_metric_rows
+from .activity_metrics import (
+    HR_DROPOUT_ACTIVE_CADENCE_THRESHOLD,
+    HR_DROPOUT_ACTIVE_SPEED_MPS_THRESHOLD,
+    HR_DROPOUT_ACTIVE_WATTS_THRESHOLD,
+    HR_DROPOUT_THRESHOLD,
+    source_metric_rows,
+)
 from .calculations import (
     calculated_laps,
     calculated_sprints,
@@ -1228,6 +1234,7 @@ def render_insights(conn: sqlite3.Connection) -> str:
             {metric("Threshold proxy", threshold_value_label(threshold), "green")}
             {metric("With FIT splits", len(split_rows), "blue")}
             {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
+            {metric("HR dropouts", count_rows_with_flag(source_rows, "hr_dropout_suspected"), "amber")}
             {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
           </div>
         </div>
@@ -2149,6 +2156,7 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
     device_watts = step_value(payload.get("average_watts"), 1)
     resistance = row_value(row, "default_resistance", 4)
     notes = default_promotion_notes(row)
+    hr_note = hr_quality_note(payload)
     return f"""
       <form class="stack" method="post" action="/review/promote">
         <input type="hidden" name="id" value="{row['id']}">
@@ -2161,6 +2169,7 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
         <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
         <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
         <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
+        {hr_note}
         <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
         <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
         <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
@@ -2228,6 +2237,9 @@ def source_metric_summary(row: sqlite3.Row) -> str:
         pieces.append(f"rpm avg {fmt_num(payload.get('average_cadence'), 0)} max {fmt_num(payload.get('max_cadence'), 0)}")
     if payload.get("average_speed_mps") is not None:
         pieces.append(f"speed avg {fmt_num(payload.get('average_speed_mps'), 1)} m/s")
+    hr_text = hr_quality_text(payload)
+    if hr_text:
+        pieces.append(hr_text)
     if payload.get("calories") is not None:
         pieces.append(f"source calories {fmt_num(payload.get('calories'), 0)}")
     split_summary = fit_split_summary(payload)
@@ -2238,7 +2250,36 @@ def source_metric_summary(row: sqlite3.Row) -> str:
         )
         if split_summary["partial_final_split"]:
             pieces.append("final split partial")
+        if split_summary.get("hr_dropout_split_indices"):
+            pieces.append(f"HR dropout splits {split_indices_label(split_summary['hr_dropout_split_indices'])}")
     return escape("; ".join(pieces))
+
+
+def hr_quality_note(payload: dict[str, object]) -> str:
+    text = hr_quality_text(payload)
+    if not text:
+        return ""
+    return f'<div class="muted">{escape(text)}</div>'
+
+
+def hr_quality_text(payload: dict[str, object]) -> str:
+    dropout_seconds = safe_float(payload.get("hr_dropout_seconds"))
+    raw_hr = safe_float(payload.get("average_raw_source_hr"))
+    clean_hr = safe_float(payload.get("average_source_hr"))
+    if dropout_seconds is None or dropout_seconds <= 0:
+        return ""
+    if raw_hr is not None and clean_hr is not None:
+        return (
+            f"HR corrected: {fmt_num(clean_hr, 1)} bpm from {fmt_num(raw_hr, 1)} bpm raw; "
+            f"{fmt_seconds_duration(dropout_seconds)} suspected dropout"
+        )
+    return f"HR dropout suspected: {fmt_seconds_duration(dropout_seconds)}"
+
+
+def split_indices_label(indices: object) -> str:
+    if not isinstance(indices, list):
+        return ""
+    return ", ".join(str(index) for index in indices)
 
 
 def resistance_factor_row(row: dict[str, object]) -> str:
@@ -2518,6 +2559,7 @@ def fit_split_summary(payload: dict[str, object]) -> dict[str, object]:
     if not full_durations:
         full_durations = durations
     pacing_delta = split_pacing_delta_seconds(full_durations)
+    dropout_indices = [lap["index"] for lap in laps if lap.get("hr_dropout_suspected")]
     final_lap = laps[-1]
     partial_final = (
         target_distance is not None
@@ -2535,6 +2577,8 @@ def fit_split_summary(payload: dict[str, object]) -> dict[str, object]:
         "first_half_average_seconds": split_half_average(full_durations, first=True),
         "second_half_average_seconds": split_half_average(full_durations, first=False),
         "pacing_delta_seconds": pacing_delta,
+        "hr_dropout_split_indices": dropout_indices,
+        "hr_dropout_split_count": len(dropout_indices),
         "partial_final_split": partial_final,
         "final_split_distance_m": final_lap.get("distance_m"),
         "total_split_distance_m": sum(distances),
@@ -2559,10 +2603,33 @@ def fit_split_laps(payload: dict[str, object]) -> list[dict[str, object]]:
             "duration_seconds": duration_seconds,
             "start_time": raw_lap.get("start_time"),
             "average_watts": safe_float(raw_lap.get("average_watts")),
+            "max_watts": safe_float(raw_lap.get("max_watts")),
             "average_cadence": safe_float(raw_lap.get("average_cadence")),
+            "max_cadence": safe_float(raw_lap.get("max_cadence")),
             "average_hr": safe_float(raw_lap.get("average_hr")),
+            "max_hr": safe_float(raw_lap.get("max_hr")),
+            "average_speed_mps": safe_float(raw_lap.get("average_speed_mps")),
+            "hr_dropout_suspected": fit_lap_hr_dropout_suspected(raw_lap),
         })
     return laps
+
+
+def fit_lap_hr_dropout_suspected(raw_lap: dict[str, object]) -> bool:
+    average_hr = safe_float(raw_lap.get("average_hr"))
+    max_hr = safe_float(raw_lap.get("max_hr"))
+    hr_value = max_hr if max_hr is not None else average_hr
+    if hr_value is None or hr_value > HR_DROPOUT_THRESHOLD:
+        return False
+    return (
+        safe_float(raw_lap.get("average_watts")) is not None
+        and safe_float(raw_lap.get("average_watts")) >= HR_DROPOUT_ACTIVE_WATTS_THRESHOLD
+    ) or (
+        safe_float(raw_lap.get("average_cadence")) is not None
+        and safe_float(raw_lap.get("average_cadence")) >= HR_DROPOUT_ACTIVE_CADENCE_THRESHOLD
+    ) or (
+        safe_float(raw_lap.get("average_speed_mps")) is not None
+        and safe_float(raw_lap.get("average_speed_mps")) >= HR_DROPOUT_ACTIVE_SPEED_MPS_THRESHOLD
+    )
 
 
 def typical_split_distance(distances: list[float]) -> float | None:
@@ -2622,7 +2689,7 @@ def variability_pct(values: list[float]) -> float | None:
 
 def fit_split_insights_table(rows: list[dict[str, object]]) -> str:
     return table(
-        ["Start", "Session", "Splits", "Preset", "Avg full", "Best full", "Slowest", "Variation", "2nd half", "Final"],
+        ["Start", "Session", "Splits", "Preset", "Avg full", "Best full", "Slowest", "Variation", "2nd half", "Final", "Quality"],
         [
             [
                 fmt_datetime(row["started_on"]),
@@ -2635,6 +2702,7 @@ def fit_split_insights_table(rows: list[dict[str, object]]) -> str:
                 fmt_split_percent(row["split_variability_pct"]),
                 split_pacing_label(row["pacing_delta_seconds"]),
                 final_split_label(row),
+                split_quality_label(row),
             ]
             for row in rows
         ],
@@ -2678,6 +2746,13 @@ def final_split_label(row: dict[str, object]) -> str:
     if row.get("partial_final_split"):
         return f"Partial {fmt_split_distance(row.get('final_split_distance_m'))}"
     return "Complete"
+
+
+def split_quality_label(row: dict[str, object]) -> str:
+    indices = row.get("hr_dropout_split_indices")
+    if not isinstance(indices, list) or not indices:
+        return ""
+    return f"HR dropout splits {split_indices_label(indices)}"
 
 
 def safe_float(value: object) -> float | None:
@@ -3357,13 +3432,16 @@ def best_laps_table(rows: list[dict[str, object]]) -> str:
 
 def source_metrics_table(rows: list[dict[str, object]]) -> str:
     return f"""<div class="table-scroll">{table(
-        ["Start", "Type", "Circuit", "Resistance", "Avg device W", "Avg est W", "Best 5m device", "Best 5m est", "Best 60s est", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
+        ["Start", "Type", "Circuit", "Resistance", "HR", "Raw HR", "HR quality", "Avg device W", "Avg est W", "Best 5m device", "Best 5m est", "Best 60s est", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
         [
             [
                 fmt_datetime(row["started_on"]),
                 row["session_type"],
                 row["circuit"],
                 row["resistance"],
+                fmt_num(row["average_source_hr"] or row["hr"], 1),
+                fmt_num(row["average_raw_source_hr"], 1),
+                source_row_hr_quality(row),
                 fmt_num(row["device_average_watts"], 0),
                 fmt_num(row["average_watts"], 0),
                 fmt_num(row["device_best_300s_watts"], 0),
@@ -3378,6 +3456,13 @@ def source_metrics_table(rows: list[dict[str, object]]) -> str:
             for row in rows
         ],
     )}</div>"""
+
+
+def source_row_hr_quality(row: dict[str, object]) -> str:
+    dropout_seconds = safe_float(row.get("hr_dropout_seconds"))
+    if dropout_seconds is None or dropout_seconds <= 0:
+        return ""
+    return f"{fmt_seconds_duration(dropout_seconds)} dropout"
 
 
 def table(headers: list[str], rows: list[list[object]]) -> str:
