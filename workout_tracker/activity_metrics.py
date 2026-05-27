@@ -16,6 +16,11 @@ PEAK_WINDOWS = (5, 30, 60, 300)
 INACTIVE_WATTS_THRESHOLD = 1.0
 INACTIVE_CADENCE_THRESHOLD = 1.0
 INACTIVE_SPEED_MPS_THRESHOLD = 0.2
+HR_DROPOUT_THRESHOLD = 70.0
+HR_DROPOUT_MIN_SECONDS = 20.0
+HR_DROPOUT_ACTIVE_WATTS_THRESHOLD = 100.0
+HR_DROPOUT_ACTIVE_CADENCE_THRESHOLD = 60.0
+HR_DROPOUT_ACTIVE_SPEED_MPS_THRESHOLD = 2.0
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,7 @@ def analyse_activity_samples(
     active_duration = _active_duration_seconds(ordered_raw, ordered, raw_duration)
     trimmed_count = len(ordered_raw) - len(ordered)
     trimmed_seconds = _trimmed_seconds(raw_duration, active_duration)
+    hr_analysis = _source_hr_analysis(ordered)
     metrics: dict[str, Any] = {
         "analysis_version": 1,
         "sample_count": len(ordered),
@@ -48,13 +54,17 @@ def analyse_activity_samples(
         **_metric_summary("watts", [sample.watts for sample in ordered]),
         **_metric_summary("cadence", [sample.cadence for sample in ordered]),
         **_metric_summary("speed_mps", [sample.speed_mps for sample in ordered]),
-        **_metric_summary("source_hr", [sample.hr for sample in ordered]),
+        **_metric_summary("source_hr", hr_analysis["clean_values"]),
     }
     if trimmed_count > 0:
         metrics["raw_sample_count"] = len(ordered_raw)
         metrics["trimmed_sample_count"] = trimmed_count
         metrics["raw_duration_seconds"] = raw_duration
         metrics["trailing_inactive_trim_seconds"] = trimmed_seconds
+    if hr_analysis["dropout_count"] > 0:
+        metrics.update(_metric_summary("raw_source_hr", hr_analysis["raw_values"]))
+        metrics["hr_dropout_sample_count"] = hr_analysis["dropout_count"]
+        metrics["hr_dropout_seconds"] = hr_analysis["dropout_seconds"]
 
     for window in PEAK_WINDOWS:
         metrics[f"best_{window}s_watts"] = _best_window_average(ordered, "watts", window)
@@ -64,7 +74,11 @@ def analyse_activity_samples(
     metrics["watts_variability_pct"] = _variability_pct([sample.watts for sample in ordered])
     metrics["cadence_variability_pct"] = _variability_pct([sample.cadence for sample in ordered])
     metrics["speed_variability_pct"] = _variability_pct([sample.speed_mps for sample in ordered])
-    metrics["data_quality_flags"] = _data_quality_flags(ordered, trimmed_count=trimmed_count)
+    metrics["data_quality_flags"] = _data_quality_flags(
+        ordered,
+        trimmed_count=trimmed_count,
+        hr_dropout_count=int(hr_analysis["dropout_count"]),
+    )
     return {key: value for key, value in metrics.items() if value not in (None, [], {})}
 
 
@@ -300,6 +314,73 @@ def _metric_summary(name: str, values: list[float | None]) -> dict[str, float | 
     }
 
 
+def _source_hr_analysis(samples: list[ActivitySample]) -> dict[str, object]:
+    raw_values = [sample.hr for sample in samples if sample.hr is not None]
+    dropout_indices = set(_hr_dropout_indices(samples))
+    clean_values = [
+        sample.hr
+        for index, sample in enumerate(samples)
+        if sample.hr is not None and index not in dropout_indices
+    ]
+    return {
+        "raw_values": raw_values,
+        "clean_values": clean_values,
+        "dropout_count": len(dropout_indices),
+        "dropout_seconds": _sample_span_seconds([samples[index] for index in sorted(dropout_indices)]),
+    }
+
+
+def _hr_dropout_indices(samples: list[ActivitySample]) -> list[int]:
+    candidate_indices = [
+        index
+        for index, sample in enumerate(samples)
+        if sample.hr is not None
+        and sample.hr <= HR_DROPOUT_THRESHOLD
+        and _is_active_hr_effort_sample(sample)
+    ]
+    if not candidate_indices:
+        return []
+
+    threshold_gap = max(2.0, _typical_sample_interval(samples) * 2.5)
+    dropout_indices = []
+    group = [candidate_indices[0]]
+    for index in candidate_indices[1:]:
+        previous = group[-1]
+        if samples[index].elapsed_seconds - samples[previous].elapsed_seconds <= threshold_gap:
+            group.append(index)
+        else:
+            dropout_indices.extend(_confirmed_hr_dropout_group(samples, group))
+            group = [index]
+    dropout_indices.extend(_confirmed_hr_dropout_group(samples, group))
+    return dropout_indices
+
+
+def _confirmed_hr_dropout_group(samples: list[ActivitySample], indices: list[int]) -> list[int]:
+    if _sample_span_seconds([samples[index] for index in indices]) < HR_DROPOUT_MIN_SECONDS:
+        return []
+    return indices
+
+
+def _sample_span_seconds(samples: list[ActivitySample]) -> float | None:
+    if not samples:
+        return None
+    start = min(sample.elapsed_seconds for sample in samples)
+    end = max(sample.elapsed_seconds for sample in samples)
+    return max(0.0, end - start + _typical_sample_interval(samples))
+
+
+def _is_active_hr_effort_sample(sample: ActivitySample) -> bool:
+    return (
+        _is_at_or_above(sample.watts, HR_DROPOUT_ACTIVE_WATTS_THRESHOLD)
+        or _is_at_or_above(sample.cadence, HR_DROPOUT_ACTIVE_CADENCE_THRESHOLD)
+        or _is_at_or_above(sample.speed_mps, HR_DROPOUT_ACTIVE_SPEED_MPS_THRESHOLD)
+    )
+
+
+def _is_at_or_above(value: float | None, threshold: float) -> bool:
+    return value is not None and value >= threshold
+
+
 def _variability_pct(values: list[float | None]) -> float | None:
     clean = [value for value in values if value is not None]
     if len(clean) < 2:
@@ -344,12 +425,19 @@ def _second_series(samples: list[ActivitySample], metric: str) -> list[float]:
     return series
 
 
-def _data_quality_flags(samples: list[ActivitySample], *, trimmed_count: int = 0) -> list[str]:
+def _data_quality_flags(
+    samples: list[ActivitySample],
+    *,
+    trimmed_count: int = 0,
+    hr_dropout_count: int = 0,
+) -> list[str]:
     flags = []
     if not samples:
         return ["no_trackpoints"]
     if trimmed_count > 0:
         flags.append("trailing_inactive_trimmed")
+    if hr_dropout_count > 0:
+        flags.append("hr_dropout_suspected")
     if not any(sample.watts is not None for sample in samples):
         flags.append("no_watts")
     if not any(sample.cadence is not None for sample in samples):
