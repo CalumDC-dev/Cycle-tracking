@@ -15,6 +15,8 @@ python -m workout_tracker.cli serve --port 8000
 
 Then open `http://127.0.0.1:8000`.
 
+For an isolated WSL-based runtime and test setup, see [docs/wsl-sandbox.md](docs/wsl-sandbox.md).
+
 ## Design Notes
 
 - Raw source activities are stored separately from calibrated sprint/lap records.
