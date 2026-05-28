@@ -122,7 +122,9 @@ class ActivityImportTests(unittest.TestCase):
         self.assertEqual(rows[0]["hr"], "124")
         self.assertIn('"average_cadence": 110.0', rows[0]["raw_payload"])
         self.assertIn('"average_watts": 275.0', rows[0]["raw_payload"])
-        self.assertIn('"analysis_version": 1', rows[0]["raw_payload"])
+        self.assertIn('"analysis_version": 2', rows[0]["raw_payload"])
+        self.assertIn('"source_hr_coverage_pct": 100.0', rows[0]["raw_payload"])
+        self.assertIn('"average_active_source_hr": 124.0', rows[0]["raw_payload"])
         self.assertIn('"max_speed_mps"', rows[0]["raw_payload"])
         self.assertIn('"trackpoint_count": 2', rows[0]["raw_payload"])
 
@@ -261,6 +263,12 @@ class ActivityImportTests(unittest.TestCase):
         self.assertEqual(payload["max_watts"], 300)
         self.assertEqual(payload["average_cadence"], 110.0)
         self.assertEqual(payload["average_source_hr"], 122.0)
+        self.assertEqual(payload["average_active_source_hr"], 122.0)
+        self.assertEqual(payload["source_hr_basis"], "record_samples")
+        self.assertEqual(payload["source_hr_sample_count"], 2)
+        self.assertEqual(payload["raw_source_hr_sample_count"], 2)
+        self.assertEqual(payload["active_source_hr_sample_count"], 2)
+        self.assertAlmostEqual(payload["source_hr_coverage_pct"], 100.0)
         self.assertEqual(payload["session_average_watts"], 349)
 
     def test_load_strava_bulk_zip_merges_csv_metadata_with_fit_payload(self):

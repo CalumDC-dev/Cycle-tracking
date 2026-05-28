@@ -39,8 +39,11 @@ class ExporterTests(unittest.TestCase):
                     {
                         "average_watts": 250,
                         "best_300s_watts": 240,
+                        "source_hr_basis": "record_samples",
                         "average_source_hr": 122.5,
+                        "average_active_source_hr": 123.0,
                         "average_raw_source_hr": 113.5,
+                        "source_hr_coverage_pct": 80,
                         "hr_dropout_seconds": 306,
                         "data_quality_flags": ["hr_dropout_suspected"],
                     }
@@ -57,7 +60,10 @@ class ExporterTests(unittest.TestCase):
 
         self.assertIn(source_file, files)
         self.assertIn("average_watts", text)
+        self.assertIn("source_hr_basis", text)
+        self.assertIn("average_active_source_hr", text)
         self.assertIn("average_raw_source_hr", text)
+        self.assertIn("source_hr_coverage_pct", text)
         self.assertIn("hr_dropout_seconds", text)
         self.assertIn("hr_dropout_suspected", text)
         self.assertIn("250", text)

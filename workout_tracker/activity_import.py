@@ -269,6 +269,8 @@ def _load_tcx_root(root: ET.Element, fallback_title: str, source: str) -> list[d
         calories = sum(_float(_child_text(lap, "Calories")) or 0 for lap in laps)
         samples = _trackpoint_samples(activity)
         analysis = analyse_activity_samples(samples, duration_seconds=duration if duration else None)
+        if analysis.get("average_source_hr") is not None:
+            analysis["source_hr_basis"] = "trackpoints"
         active_duration = _active_duration_from_analysis(analysis, duration if duration else None)
         row: dict[str, Any] = {
             "source": source,
@@ -356,6 +358,8 @@ def _load_fit_bytes(data: bytes, name: str, source: str) -> list[dict[str, Any]]
         "session_normalized_power": session.get("normalized_power"),
         **analysis,
     }
+    if payload.get("average_source_hr") is not None:
+        payload["source_hr_basis"] = "record_samples"
     if payload.get("average_watts") is None and session.get("avg_power") is not None:
         payload["average_watts"] = session["avg_power"]
     if payload.get("max_watts") is None and session.get("max_power") is not None:
@@ -370,6 +374,10 @@ def _load_fit_bytes(data: bytes, name: str, source: str) -> list[dict[str, Any]]
         payload["max_speed_mps"] = session.get("enhanced_max_speed") or session.get("max_speed")
     if payload.get("average_source_hr") is None and session.get("avg_heart_rate") is not None:
         payload["average_source_hr"] = session["avg_heart_rate"]
+        payload["source_hr_basis"] = "session_summary"
+        flags = payload.get("data_quality_flags")
+        if isinstance(flags, list) and "missing_source_hr" in flags:
+            payload["data_quality_flags"] = [flag for flag in flags if flag != "missing_source_hr"]
     if payload.get("max_source_hr") is None and session.get("max_heart_rate") is not None:
         payload["max_source_hr"] = session["max_heart_rate"]
     return [

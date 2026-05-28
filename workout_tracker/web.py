@@ -660,6 +660,8 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
     {metric("Best 5 min est watts", fmt_num(max_metric(source_rows, "best_300s_watts"), 0), "amber")}
     {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
     {metric("Best avg cadence", fmt_num(max_metric(source_rows, "average_cadence"), 0), "green")}
+    {metric("Reliable source HR", reliable_source_hr_count(source_rows), "green")}
+    {metric("Avg HR coverage", fmt_pct_100(average_metric(source_rows, "source_hr_coverage_pct")), "blue")}
   </div>
 </section>
 <section class="band">
@@ -1201,6 +1203,11 @@ def render_insights(conn: sqlite3.Connection) -> str:
     source_device_watts = source_metric_points(source_rows, "device_average_watts")
     source_best_60s = source_metric_points(source_rows, "best_60s_watts")
     source_cadence_variability = source_metric_points(source_rows, "cadence_variability_pct")
+    source_hr = source_metric_points(source_rows, "average_source_hr")
+    source_active_hr = source_metric_points(source_rows, "average_active_source_hr")
+    source_hr_coverage = source_metric_points(source_rows, "source_hr_coverage_pct")
+    source_watts_per_bpm = source_hr_efficiency_points(source_rows)
+    hr_quality_rows = source_hr_quality_rows(source_rows)
     return f"""
 <section class="band">
   <h2>Insights</h2>
@@ -1233,6 +1240,8 @@ def render_insights(conn: sqlite3.Connection) -> str:
             {metric("Best 60 sec est watts", fmt_num(max_metric(source_rows, "best_60s_watts"), 0), "amber")}
             {metric("Threshold proxy", threshold_value_label(threshold), "green")}
             {metric("With FIT splits", len(split_rows), "blue")}
+            {metric("Reliable source HR", reliable_source_hr_count(source_rows), "green")}
+            {metric("Avg HR coverage", fmt_pct_100(average_metric(source_rows, "source_hr_coverage_pct")), "blue")}
             {metric("Trimmed sessions", count_rows_with_flag(source_rows, "trailing_inactive_trimmed"), "blue")}
             {metric("HR dropouts", count_rows_with_flag(source_rows, "hr_dropout_suspected"), "amber")}
             {metric("Missing source HR", count_rows_with_flag(source_rows, "missing_source_hr"), "red")}
@@ -1258,6 +1267,10 @@ def render_insights(conn: sqlite3.Connection) -> str:
             {chart_panel("Average Device Watts", source_device_watts, "#6a4c93", "W")}
             {chart_panel("Best 60 Second Estimated Watts", source_best_60s, "#a66200", "W")}
             {chart_panel("Cadence Variability", source_cadence_variability, "#a33b3b", "%")}
+            {chart_panel("Source Heart Rate", source_hr, "#a33b3b", "bpm")}
+            {chart_panel("Active Effort HR", source_active_hr, "#7b2d26", "bpm")}
+            {chart_panel("HR Coverage", source_hr_coverage, "#2f7d59", "%")}
+            {chart_panel("Estimated Watts Per BPM", source_watts_per_bpm, "#1f5a85", "W/bpm")}
           </div>
         </div>
         <div class="panel-block">
@@ -1298,6 +1311,10 @@ def render_insights(conn: sqlite3.Connection) -> str:
         </div>
       ''',
       quality=f'''
+        <div class="panel-block">
+          <h3>Source HR Reliability</h3>
+          {source_hr_quality_table(hr_quality_rows)}
+        </div>
         <div class="panel-block">
           <h3>Source Data Quality</h3>
           {source_quality_table(source_quality)}
@@ -2266,12 +2283,30 @@ def hr_quality_text(payload: dict[str, object]) -> str:
     dropout_seconds = safe_float(payload.get("hr_dropout_seconds"))
     raw_hr = safe_float(payload.get("average_raw_source_hr"))
     clean_hr = safe_float(payload.get("average_source_hr"))
+    coverage = safe_float(payload.get("source_hr_coverage_pct"))
+    flags = payload.get("data_quality_flags")
+    missing_hr = (
+        "missing_source_hr" in flags
+        if isinstance(flags, list)
+        else "missing_source_hr" in str(flags or "")
+    )
+    if missing_hr:
+        return "HR missing from source"
     if dropout_seconds is None or dropout_seconds <= 0:
-        return ""
+        if clean_hr is None:
+            return ""
+        coverage_text = f", {fmt_pct_100(coverage)} coverage" if coverage is not None else ""
+        if coverage is not None and coverage >= 95:
+            return f"HR complete: {fmt_num(clean_hr, 1)} bpm{coverage_text}"
+        if coverage is not None:
+            return f"HR partial: {fmt_num(clean_hr, 1)} bpm{coverage_text}"
+        return f"HR avg: {fmt_num(clean_hr, 1)} bpm"
     if raw_hr is not None and clean_hr is not None:
+        coverage_text = f"; {fmt_pct_100(coverage)} coverage" if coverage is not None else ""
         return (
             f"HR corrected: {fmt_num(clean_hr, 1)} bpm from {fmt_num(raw_hr, 1)} bpm raw; "
             f"{fmt_seconds_duration(dropout_seconds)} suspected dropout"
+            f"{coverage_text}"
         )
     return f"HR dropout suspected: {fmt_seconds_duration(dropout_seconds)}"
 
@@ -2506,6 +2541,17 @@ def source_highlights_table(rows: list[dict[str, object]]) -> str:
         highlights.append([
             label,
             fmt_num(row.get(key), digits),
+            fmt_datetime(row.get("started_on", "")),
+            row.get("session_type", ""),
+            row.get("circuit", ""),
+            row.get("resistance", ""),
+        ])
+    efficiency = best_source_hr_efficiency_row(rows)
+    if efficiency is not None:
+        row, value = efficiency
+        highlights.append([
+            "Estimated watts per bpm",
+            fmt_num(value, 2),
             fmt_datetime(row.get("started_on", "")),
             row.get("session_type", ""),
             row.get("circuit", ""),
@@ -2914,6 +2960,20 @@ def progress_marker_rows(
             "FIT/TCX source peak, scaled by resistance",
         ),
         trend_comparison_row(
+            "Source average HR",
+            source_metric_series(source_rows, "average_source_hr"),
+            "bpm",
+            0,
+            "Cleaned FIT/TCX HR, excluding suspected dropouts",
+        ),
+        trend_comparison_row(
+            "Source watts per bpm",
+            source_hr_efficiency_points(source_rows),
+            "W/bpm",
+            2,
+            "Estimated source watts divided by cleaned source HR",
+        ),
+        trend_comparison_row(
             "Weekly workout time",
             weekly_series(weekly_rows, "total_minutes"),
             "min",
@@ -2977,6 +3037,16 @@ def sprint_efficiency_series(sprints: list[object]) -> list[tuple[str, float | N
 
 def source_metric_series(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
     return [(str(row.get("started_on") or row.get("id") or ""), maybe_float(row.get(key))) for row in rows]
+
+
+def source_hr_efficiency_points(rows: list[dict[str, object]]) -> list[tuple[str, float | None]]:
+    output = []
+    for row in rows:
+        watts = safe_float(row.get("average_watts"))
+        hr = safe_float(row.get("average_source_hr"))
+        value = watts / hr if watts is not None and hr not in (None, 0) else None
+        output.append((str(row.get("started_on") or row.get("id") or ""), value))
+    return output
 
 
 def weekly_series(rows: list[dict[str, object]], key: str) -> list[tuple[str, float | None]]:
@@ -3227,6 +3297,8 @@ def source_performance_by_resistance(rows: list[dict[str, object]]) -> list[dict
                 "device_average_watts": [],
                 "best_300s_watts": [],
                 "average_cadence": [],
+                "average_source_hr": [],
+                "source_hr_coverage_pct": [],
                 "watts_variability_pct": [],
                 "flagged_sessions": 0,
             },
@@ -3236,6 +3308,8 @@ def source_performance_by_resistance(rows: list[dict[str, object]]) -> list[dict
         append_numeric(group["device_average_watts"], row.get("device_average_watts"))
         append_numeric(group["best_300s_watts"], row.get("best_300s_watts"))
         append_numeric(group["average_cadence"], row.get("average_cadence"))
+        append_numeric(group["average_source_hr"], row.get("average_source_hr"))
+        append_numeric(group["source_hr_coverage_pct"], row.get("source_hr_coverage_pct"))
         append_numeric(group["watts_variability_pct"], row.get("watts_variability_pct"))
         if source_flags(row):
             group["flagged_sessions"] = int(group["flagged_sessions"]) + 1
@@ -3250,6 +3324,8 @@ def source_performance_by_resistance(rows: list[dict[str, object]]) -> list[dict
             "device_average_watts": average_value(group["device_average_watts"]),
             "best_300s_watts": max(best_300s) if best_300s else None,
             "average_cadence": average_value(group["average_cadence"]),
+            "average_source_hr": average_value(group["average_source_hr"]),
+            "source_hr_coverage_pct": average_value(group["source_hr_coverage_pct"]),
             "watts_variability_pct": average_value(group["watts_variability_pct"]),
             "flagged_sessions": group["flagged_sessions"],
         })
@@ -3258,7 +3334,7 @@ def source_performance_by_resistance(rows: list[dict[str, object]]) -> list[dict
 
 def source_resistance_table(rows: list[dict[str, object]]) -> str:
     return table(
-        ["Resistance", "Sessions", "Avg est watts", "Avg device watts", "Best 5m est", "Avg RPM", "Watts var", "Flagged"],
+        ["Resistance", "Sessions", "Avg est watts", "Avg device watts", "Best 5m est", "Avg RPM", "Avg HR", "HR coverage", "Watts var", "Flagged"],
         [
             [
                 row["resistance"],
@@ -3267,6 +3343,8 @@ def source_resistance_table(rows: list[dict[str, object]]) -> str:
                 fmt_num(row["device_average_watts"], 0),
                 fmt_num(row["best_300s_watts"], 0),
                 fmt_num(row["average_cadence"], 0),
+                fmt_num(row["average_source_hr"], 0),
+                fmt_pct_100(row["source_hr_coverage_pct"]),
                 fmt_num(row["watts_variability_pct"], 1),
                 row["flagged_sessions"],
             ]
@@ -3290,6 +3368,46 @@ def source_quality_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Quality flag", "Sessions"],
         [[row["flag"], row["sessions"]] for row in rows],
+    )
+
+
+def source_hr_quality_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = source_hr_quality_bucket(row)
+        counts[label] = counts.get(label, 0) + 1
+    order = {
+        "Complete HR": 0,
+        "Corrected HR dropout": 1,
+        "Partial HR": 2,
+        "Present, coverage unknown": 3,
+        "Missing HR": 4,
+    }
+    return [
+        {"status": status, "sessions": count}
+        for status, count in sorted(counts.items(), key=lambda item: (order.get(item[0], 9), item[0]))
+    ]
+
+
+def source_hr_quality_bucket(row: dict[str, object]) -> str:
+    flags = source_flags(row)
+    coverage = safe_float(row.get("source_hr_coverage_pct"))
+    hr_present = row.get("average_source_hr") not in (None, "") or row.get("hr") not in (None, "")
+    if "missing_source_hr" in flags or not hr_present:
+        return "Missing HR"
+    if safe_float(row.get("hr_dropout_seconds")) not in (None, 0):
+        return "Corrected HR dropout"
+    if coverage is None:
+        return "Present, coverage unknown"
+    if coverage >= 95:
+        return "Complete HR"
+    return "Partial HR"
+
+
+def source_hr_quality_table(rows: list[dict[str, object]]) -> str:
+    return table(
+        ["HR status", "Sessions"],
+        [[row["status"], row["sessions"]] for row in rows],
     )
 
 
@@ -3432,7 +3550,7 @@ def best_laps_table(rows: list[dict[str, object]]) -> str:
 
 def source_metrics_table(rows: list[dict[str, object]]) -> str:
     return f"""<div class="table-scroll">{table(
-        ["Start", "Type", "Circuit", "Resistance", "HR", "Raw HR", "HR quality", "Avg device W", "Avg est W", "Best 5m device", "Best 5m est", "Best 60s est", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
+        ["Start", "Type", "Circuit", "Resistance", "HR", "Active HR", "Raw HR", "HR coverage", "HR quality", "Avg device W", "Avg est W", "Best 5m device", "Best 5m est", "Best 60s est", "Avg RPM", "Max RPM", "Avg speed", "Watts var", "Flags"],
         [
             [
                 fmt_datetime(row["started_on"]),
@@ -3440,7 +3558,9 @@ def source_metrics_table(rows: list[dict[str, object]]) -> str:
                 row["circuit"],
                 row["resistance"],
                 fmt_num(row["average_source_hr"] or row["hr"], 1),
+                fmt_num(row["average_active_source_hr"], 1),
                 fmt_num(row["average_raw_source_hr"], 1),
+                fmt_pct_100(row["source_hr_coverage_pct"]),
                 source_row_hr_quality(row),
                 fmt_num(row["device_average_watts"], 0),
                 fmt_num(row["average_watts"], 0),
@@ -3460,9 +3580,20 @@ def source_metrics_table(rows: list[dict[str, object]]) -> str:
 
 def source_row_hr_quality(row: dict[str, object]) -> str:
     dropout_seconds = safe_float(row.get("hr_dropout_seconds"))
-    if dropout_seconds is None or dropout_seconds <= 0:
-        return ""
-    return f"{fmt_seconds_duration(dropout_seconds)} dropout"
+    coverage = safe_float(row.get("source_hr_coverage_pct"))
+    flags = source_flags(row)
+    if "missing_source_hr" in flags:
+        return "Missing"
+    if dropout_seconds is not None and dropout_seconds > 0:
+        coverage_text = f"; {fmt_pct_100(coverage)} coverage" if coverage is not None else ""
+        return f"{fmt_seconds_duration(dropout_seconds)} dropout{coverage_text}"
+    if coverage is not None:
+        if coverage >= 95:
+            return f"Complete ({fmt_pct_100(coverage)})"
+        return f"Partial ({fmt_pct_100(coverage)})"
+    if row.get("average_source_hr") not in (None, "") or row.get("hr") not in (None, ""):
+        return "Present"
+    return ""
 
 
 def table(headers: list[str], rows: list[list[object]]) -> str:
@@ -3685,6 +3816,14 @@ def count_rows_with_flag(rows: list[dict[str, object]], flag: str) -> int:
     return sum(1 for row in rows if flag in source_flags(row))
 
 
+def reliable_source_hr_count(rows: list[dict[str, object]]) -> int:
+    return sum(
+        1
+        for row in rows
+        if source_hr_quality_bucket(row) == "Complete HR"
+    )
+
+
 def source_flags(row: dict[str, object]) -> list[str]:
     raw = row.get("data_quality_flags")
     if raw in (None, ""):
@@ -3719,11 +3858,30 @@ def max_metric(rows: list[dict[str, object]], key: str) -> float | None:
     return max(values) if values else None
 
 
+def average_metric(rows: list[dict[str, object]], key: str) -> float | None:
+    values = []
+    for row in rows:
+        value = safe_float(row.get(key))
+        if value is not None:
+            values.append(value)
+    return average_value(values) if values else None
+
+
 def best_source_row(rows: list[dict[str, object]], key: str) -> dict[str, object] | None:
     candidates = [row for row in rows if row.get(key) not in (None, "")]
     if not candidates:
         return None
     return max(candidates, key=lambda row: float(row[key]))
+
+
+def best_source_hr_efficiency_row(rows: list[dict[str, object]]) -> tuple[dict[str, object], float] | None:
+    candidates = []
+    for row in rows:
+        watts = safe_float(row.get("average_watts"))
+        hr = safe_float(row.get("average_source_hr"))
+        if watts is not None and hr not in (None, 0):
+            candidates.append((row, watts / hr))
+    return max(candidates, key=lambda item: item[1]) if candidates else None
 
 
 def max_sprint_watts(sprints: list[object]) -> float | None:
@@ -5135,6 +5293,12 @@ def fmt_percent(value: object) -> str:
     if value is None:
         return ""
     return f"{float(value):.1%}"
+
+
+def fmt_pct_100(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    return f"{float(value):.1f}%"
 
 
 def fmt_minutes(value: object) -> str:

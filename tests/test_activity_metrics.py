@@ -15,8 +15,11 @@ class ActivityMetricsTests(unittest.TestCase):
 
         metrics = analyse_activity_samples(samples, duration_seconds=10)
 
-        self.assertEqual(metrics["analysis_version"], 1)
+        self.assertEqual(metrics["analysis_version"], 2)
         self.assertEqual(metrics["sample_count"], 10)
+        self.assertEqual(metrics["source_hr_sample_count"], 0)
+        self.assertEqual(metrics["raw_source_hr_sample_count"], 0)
+        self.assertAlmostEqual(metrics["source_hr_coverage_pct"], 0.0)
         self.assertAlmostEqual(metrics["average_watts"], 145.0)
         self.assertAlmostEqual(metrics["best_5s_watts"], 170.0)
         self.assertAlmostEqual(metrics["best_5s_cadence"], 87.0)
@@ -40,6 +43,8 @@ class ActivityMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["trailing_inactive_trim_seconds"], 119)
         self.assertAlmostEqual(metrics["average_watts"], 208.3333333333)
         self.assertAlmostEqual(metrics["average_source_hr"], 121.6666666667)
+        self.assertAlmostEqual(metrics["average_active_source_hr"], 121.6666666667)
+        self.assertAlmostEqual(metrics["source_hr_coverage_pct"], 100.0)
         self.assertIn("trailing_inactive_trimmed", metrics["data_quality_flags"])
 
     def test_analyse_activity_samples_ignores_sustained_low_hr_dropout_during_effort(self):
@@ -60,9 +65,16 @@ class ActivityMetricsTests(unittest.TestCase):
 
         self.assertAlmostEqual(metrics["average_raw_source_hr"], 99.2)
         self.assertAlmostEqual(metrics["average_source_hr"], 122.0)
+        self.assertAlmostEqual(metrics["average_active_source_hr"], 122.0)
         self.assertEqual(metrics["min_source_hr"], 118)
+        self.assertEqual(metrics["source_hr_sample_count"], 60)
+        self.assertEqual(metrics["raw_source_hr_sample_count"], 100)
+        self.assertEqual(metrics["active_source_hr_sample_count"], 60)
+        self.assertAlmostEqual(metrics["source_hr_coverage_pct"], 60.0)
+        self.assertAlmostEqual(metrics["raw_source_hr_coverage_pct"], 100.0)
         self.assertEqual(metrics["hr_dropout_sample_count"], 40)
         self.assertAlmostEqual(metrics["hr_dropout_seconds"], 40)
+        self.assertAlmostEqual(metrics["hr_dropout_pct"], 40.0)
         self.assertIn("hr_dropout_suspected", metrics["data_quality_flags"])
 
     def test_analyse_activity_samples_keeps_short_low_hr_periods(self):
@@ -78,6 +90,7 @@ class ActivityMetricsTests(unittest.TestCase):
         metrics = analyse_activity_samples(samples, duration_seconds=30)
 
         self.assertAlmostEqual(metrics["average_source_hr"], 98.3333333333)
+        self.assertAlmostEqual(metrics["source_hr_coverage_pct"], 100.0)
         self.assertNotIn("hr_dropout_suspected", metrics.get("data_quality_flags", []))
 
     def test_source_metric_rows_flattens_payload_for_export_and_dashboard(self):
@@ -108,9 +121,17 @@ class ActivityMetricsTests(unittest.TestCase):
                         "average_watts": 250,
                         "best_300s_watts": 245,
                         "average_cadence": 120,
+                        "source_hr_basis": "record_samples",
                         "average_source_hr": 122.5,
+                        "average_active_source_hr": 123.5,
                         "average_raw_source_hr": 113.5,
+                        "source_hr_sample_count": 240,
+                        "raw_source_hr_sample_count": 300,
+                        "active_source_hr_sample_count": 220,
+                        "source_hr_coverage_pct": 80,
+                        "raw_source_hr_coverage_pct": 100,
                         "hr_dropout_seconds": 306,
+                        "hr_dropout_pct": 51,
                         "data_quality_flags": ["hr_dropout_suspected"],
                     }
                 ),
@@ -126,9 +147,17 @@ class ActivityMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["average_watts"], 50)
         self.assertEqual(rows[0]["best_300s_watts"], 49)
         self.assertEqual(rows[0]["device_average_watts"], 250)
+        self.assertEqual(rows[0]["source_hr_basis"], "record_samples")
         self.assertEqual(rows[0]["average_source_hr"], 122.5)
+        self.assertEqual(rows[0]["average_active_source_hr"], 123.5)
         self.assertEqual(rows[0]["average_raw_source_hr"], 113.5)
+        self.assertEqual(rows[0]["source_hr_sample_count"], 240)
+        self.assertEqual(rows[0]["raw_source_hr_sample_count"], 300)
+        self.assertEqual(rows[0]["active_source_hr_sample_count"], 220)
+        self.assertEqual(rows[0]["source_hr_coverage_pct"], 80)
+        self.assertEqual(rows[0]["raw_source_hr_coverage_pct"], 100)
         self.assertEqual(rows[0]["hr_dropout_seconds"], 306)
+        self.assertEqual(rows[0]["hr_dropout_pct"], 51)
         self.assertEqual(rows[0]["data_quality_flags"], "hr_dropout_suspected")
 
     def test_source_metric_rows_uses_interpolated_resistance_scaling(self):
