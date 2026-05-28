@@ -616,6 +616,8 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(coverage_rows[7]["provenance"], "measured")
         self.assertIn("Progress Overview", html)
         self.assertIn("Progress Markers", html)
+        self.assertIn("Source average HR", html)
+        self.assertIn("Source watts per bpm", html)
         self.assertIn("Personal Records", html)
         self.assertIn("Threshold Proxy", html)
         self.assertIn("Estimated threshold proxy", html)
@@ -628,6 +630,10 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("Weekly Consistency", html)
         self.assertIn("FIT Source Summary", html)
         self.assertIn("FIT Source Trends", html)
+        self.assertIn("Reliable source HR", html)
+        self.assertIn("Avg HR coverage", html)
+        self.assertIn("Source HR Reliability", html)
+        self.assertIn("Missing HR", html)
         self.assertIn("Source Performance By Resistance", html)
         self.assertIn("Source Data Quality", html)
         self.assertIn("Recent Source Metrics", html)
@@ -651,8 +657,15 @@ class WebActionTests(unittest.TestCase):
             "max_watts": 350,
             "average_cadence": 120,
             "average_source_hr": 122.656,
+            "average_active_source_hr": 124.0,
             "average_raw_source_hr": 113.482,
+            "source_hr_sample_count": 120,
+            "raw_source_hr_sample_count": 165,
+            "active_source_hr_sample_count": 115,
+            "source_hr_coverage_pct": 72.727,
+            "raw_source_hr_coverage_pct": 100.0,
             "hr_dropout_seconds": 306,
+            "hr_dropout_pct": 51.0,
             "data_quality_flags": ["hr_dropout_suspected"],
             "laps": [
                 {"distance_m": 1000, "duration_seconds": 70, "start_time": "2026-05-21T08:36:00Z", "average_hr": 120, "max_hr": 124, "average_watts": 300, "average_cadence": 120},
@@ -689,12 +702,21 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("3 FIT splits; 2 full x 1.00 km", review_html)
         self.assertIn("final split partial", review_html)
         self.assertIn("HR corrected: 122.7 bpm from 113.5 bpm raw; 5:06 suspected dropout", review_html)
+        self.assertIn("72.7% coverage", review_html)
         self.assertIn("HR dropout splits 2", review_html)
         self.assertIn("FIT Split Insights", insights_html)
         self.assertIn("3 total / 2 full", insights_html)
         self.assertIn("0:05 faster", insights_html)
         self.assertIn("Partial 500 m", insights_html)
         self.assertIn("HR dropouts", insights_html)
+        self.assertIn("Source Heart Rate (bpm)", insights_html)
+        self.assertIn("Active Effort HR (bpm)", insights_html)
+        self.assertIn("HR Coverage (%)", insights_html)
+        self.assertIn("Estimated Watts Per BPM (W/bpm)", insights_html)
+        self.assertIn("Source HR Reliability", insights_html)
+        self.assertIn("Corrected HR dropout", insights_html)
+        self.assertIn("HR coverage", insights_html)
+        self.assertIn("Active HR", insights_html)
         self.assertIn("HR dropout splits 2", insights_html)
         self.assertIn("5:06 dropout", insights_html)
 

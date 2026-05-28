@@ -46,15 +46,22 @@ def analyse_activity_samples(
     trimmed_count = len(ordered_raw) - len(ordered)
     trimmed_seconds = _trimmed_seconds(raw_duration, active_duration)
     hr_analysis = _source_hr_analysis(ordered)
+    sample_count = len(ordered)
     metrics: dict[str, Any] = {
-        "analysis_version": 1,
-        "sample_count": len(ordered),
+        "analysis_version": 2,
+        "sample_count": sample_count,
         "sample_duration_seconds": active_duration,
         "active_duration_seconds": active_duration,
+        "source_hr_sample_count": hr_analysis["clean_count"],
+        "raw_source_hr_sample_count": hr_analysis["raw_count"],
+        "source_hr_coverage_pct": _coverage_pct(hr_analysis["clean_count"], sample_count),
+        "raw_source_hr_coverage_pct": _coverage_pct(hr_analysis["raw_count"], sample_count),
+        "active_source_hr_sample_count": hr_analysis["active_clean_count"],
         **_metric_summary("watts", [sample.watts for sample in ordered]),
         **_metric_summary("cadence", [sample.cadence for sample in ordered]),
         **_metric_summary("speed_mps", [sample.speed_mps for sample in ordered]),
         **_metric_summary("source_hr", hr_analysis["clean_values"]),
+        **_metric_summary("active_source_hr", hr_analysis["active_clean_values"]),
     }
     if trimmed_count > 0:
         metrics["raw_sample_count"] = len(ordered_raw)
@@ -65,6 +72,10 @@ def analyse_activity_samples(
         metrics.update(_metric_summary("raw_source_hr", hr_analysis["raw_values"]))
         metrics["hr_dropout_sample_count"] = hr_analysis["dropout_count"]
         metrics["hr_dropout_seconds"] = hr_analysis["dropout_seconds"]
+        metrics["hr_dropout_pct"] = _coverage_pct(
+            hr_analysis["dropout_seconds"],
+            active_duration,
+        )
 
     for window in PEAK_WINDOWS:
         metrics[f"best_{window}s_watts"] = _best_window_average(ordered, "watts", window)
@@ -159,14 +170,22 @@ def source_metric_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
                 "duration_seconds": row["duration_seconds"],
                 "raw_distance": row["raw_distance"],
                 "hr": row["hr"],
+                "source_hr_basis": payload.get("source_hr_basis"),
                 "average_source_hr": payload.get("average_source_hr"),
                 "average_raw_source_hr": payload.get("average_raw_source_hr"),
+                "average_active_source_hr": payload.get("average_active_source_hr"),
                 "min_source_hr": payload.get("min_source_hr"),
                 "max_source_hr": payload.get("max_source_hr"),
                 "min_raw_source_hr": payload.get("min_raw_source_hr"),
                 "max_raw_source_hr": payload.get("max_raw_source_hr"),
+                "source_hr_sample_count": payload.get("source_hr_sample_count"),
+                "raw_source_hr_sample_count": payload.get("raw_source_hr_sample_count"),
+                "active_source_hr_sample_count": payload.get("active_source_hr_sample_count"),
+                "source_hr_coverage_pct": payload.get("source_hr_coverage_pct"),
+                "raw_source_hr_coverage_pct": payload.get("raw_source_hr_coverage_pct"),
                 "hr_dropout_sample_count": payload.get("hr_dropout_sample_count"),
                 "hr_dropout_seconds": payload.get("hr_dropout_seconds"),
+                "hr_dropout_pct": payload.get("hr_dropout_pct"),
                 "resistance": row["resistance"],
                 "resistance_scaling": row["resistance_scaling"],
                 "calories": payload.get("calories"),
@@ -330,12 +349,32 @@ def _source_hr_analysis(samples: list[ActivitySample]) -> dict[str, object]:
         for index, sample in enumerate(samples)
         if sample.hr is not None and index not in dropout_indices
     ]
+    active_clean_values = [
+        sample.hr
+        for index, sample in enumerate(samples)
+        if sample.hr is not None
+        and index not in dropout_indices
+        and _is_active_hr_effort_sample(sample)
+    ]
     return {
         "raw_values": raw_values,
         "clean_values": clean_values,
+        "active_clean_values": active_clean_values,
+        "raw_count": len(raw_values),
+        "clean_count": len(clean_values),
+        "active_clean_count": len(active_clean_values),
         "dropout_count": len(dropout_indices),
         "dropout_seconds": _sample_span_seconds([samples[index] for index in sorted(dropout_indices)]),
     }
+
+
+def _coverage_pct(value: object, total: object) -> float | None:
+    if total in (None, 0):
+        return None
+    try:
+        return float(value or 0) / float(total) * 100
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 def _hr_dropout_indices(samples: list[ActivitySample]) -> list[int]:
