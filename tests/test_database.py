@@ -94,6 +94,19 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("flywheel_diameter_mm", profile_columns)
         self.assertIn("started_at", sprint_columns)
         self.assertIn("started_at", lap_columns)
+        for column in (
+            "rpe",
+            "leg_fatigue",
+            "breathing_strain",
+            "energy_level",
+            "sleep_quality",
+            "heat_flag",
+            "hydration_ok",
+            "food_ok",
+            "hit_wall",
+        ):
+            self.assertIn(column, sprint_columns)
+            self.assertIn(column, lap_columns)
         self.assertIn("source_activity_id", calibration_columns)
         self.assertIn("source_file", calibration_columns)
         self.assertIn("file_sha256", calibration_columns)

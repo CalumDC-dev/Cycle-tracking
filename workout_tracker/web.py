@@ -737,6 +737,7 @@ def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = No
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>Device distance<input name="device_distance" type="number" step="0.001" min="0"></label>
     <label>Notes<input name="notes"></label>
+    {session_feel_form_fields({})}
     <button type="submit">Add sprint</button>
   </form>
 </section>
@@ -753,6 +754,7 @@ def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = No
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
     <label>Notes<input name="notes"></label>
+    {session_feel_form_fields({})}
     <button type="submit">Add lap</button>
   </form>
   {circuit_goal_script()}
@@ -956,6 +958,98 @@ def entry_filter_summary(
     return f"{displayed_total} of {filtered_total} matching entries. Select Show all to reveal older matches."
 
 
+def session_feel_form_fields(values: dict[str, object], *, form_id: str | None = None, wrap: bool = True) -> str:
+    form_attr = f' form="{escape(form_id)}"' if form_id else ""
+    controls = f"""
+    <label>RPE{session_rating_select("rpe", values.get("rpe"), rating_labels(10), form_attr)}</label>
+    <label>Leg fatigue{session_rating_select("leg_fatigue", values.get("leg_fatigue"), {
+        1: "Fresh", 2: "Fine", 3: "Heavy", 4: "Very heavy", 5: "Failed / cliff"
+    }, form_attr)}</label>
+    <label>Breathing{session_rating_select("breathing_strain", values.get("breathing_strain"), {
+        1: "Easy", 2: "Controlled", 3: "Working", 4: "Hard", 5: "Unusual"
+    }, form_attr)}</label>
+    <label>Energy{session_rating_select("energy_level", values.get("energy_level"), {
+        1: "Empty", 2: "Low", 3: "Normal", 4: "Good", 5: "Excellent"
+    }, form_attr)}</label>
+    <label>Sleep{session_rating_select("sleep_quality", values.get("sleep_quality"), {
+        1: "Poor", 2: "Light", 3: "OK", 4: "Good", 5: "Excellent"
+    }, form_attr)}</label>
+    <label>Hydration{ternary_select("hydration_ok", values.get("hydration_ok"), form_attr, "Normal", "Off")}</label>
+    <label>Food{ternary_select("food_ok", values.get("food_ok"), form_attr, "Normal", "Off")}</label>
+    <label><span>Heat affected</span><input name="heat_flag" type="checkbox" value="1"{form_attr}{checked_attr(values.get("heat_flag"))}></label>
+    <label><span>Hit wall</span><input name="hit_wall" type="checkbox" value="1"{form_attr}{checked_attr(values.get("hit_wall"))}></label>
+"""
+    if not wrap:
+        return f'<div class="stack">{controls}</div>'
+    return f"""
+<details>
+  <summary>Session feel</summary>
+  <div class="stack">{controls}</div>
+</details>"""
+
+
+def session_rating_select(name: str, current: object, labels: dict[int, str], form_attr: str = "") -> str:
+    current_text = "" if current in (None, "") else str(int(float(current)))
+    options = ['<option value="">Not recorded</option>']
+    for value, label in labels.items():
+        selected = " selected" if str(value) == current_text else ""
+        options.append(f'<option value="{value}"{selected}>{value} - {escape(label)}</option>')
+    return f'<select name="{escape(name)}"{form_attr}>{"".join(options)}</select>'
+
+
+def rating_labels(maximum: int) -> dict[int, str]:
+    return {value: str(value) for value in range(1, maximum + 1)}
+
+
+def ternary_select(name: str, current: object, form_attr: str, yes_label: str, no_label: str) -> str:
+    current_text = "" if current in (None, "") else str(int(float(current)))
+    options = [
+        ('', "Not recorded"),
+        ("1", yes_label),
+        ("0", no_label),
+    ]
+    rendered = []
+    for value, label in options:
+        selected = " selected" if value == current_text else ""
+        rendered.append(f'<option value="{value}"{selected}>{escape(label)}</option>')
+    return f'<select name="{escape(name)}"{form_attr}>{"".join(rendered)}</select>'
+
+
+def checked_attr(value: object) -> str:
+    return " checked" if value in (1, "1", True, "true", "on") else ""
+
+
+def entry_feel_controls(form_id: str, entry: object) -> str:
+    values = {
+        "rpe": getattr(entry, "rpe", None),
+        "leg_fatigue": getattr(entry, "leg_fatigue", None),
+        "breathing_strain": getattr(entry, "breathing_strain", None),
+        "energy_level": getattr(entry, "energy_level", None),
+        "sleep_quality": getattr(entry, "sleep_quality", None),
+        "heat_flag": getattr(entry, "heat_flag", None),
+        "hydration_ok": getattr(entry, "hydration_ok", None),
+        "food_ok": getattr(entry, "food_ok", None),
+        "hit_wall": getattr(entry, "hit_wall", None),
+    }
+    summary = session_feel_summary(values) or "Add feel"
+    return f"<details><summary>{escape(summary)}</summary>{session_feel_form_fields(values, form_id=form_id, wrap=False)}</details>"
+
+
+def session_feel_summary(values: dict[str, object]) -> str:
+    pieces = []
+    if values.get("rpe") not in (None, ""):
+        pieces.append(f"RPE {values['rpe']}")
+    if values.get("leg_fatigue") not in (None, ""):
+        pieces.append(f"Legs {values['leg_fatigue']}")
+    if values.get("breathing_strain") not in (None, ""):
+        pieces.append(f"Breathing {values['breathing_strain']}")
+    if values.get("hit_wall") in (1, "1", True):
+        pieces.append("wall")
+    if values.get("heat_flag") in (1, "1", True):
+        pieces.append("heat")
+    return ", ".join(pieces)
+
+
 def render_sprint_entries_table(sprints: list[object]) -> str:
     forms: list[str] = []
     rows: list[tuple[object, list[str], str]] = []
@@ -999,6 +1093,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
                     ),
                     readonly_cell(fmt_num(sprint.calibrated_distance, 2)),
                     readonly_cell(fmt_num(sprint.calories_mets, 1)),
+                    entry_feel_controls(form_id, sprint),
                     save_button(form_id),
                 ],
                 f"sprint-{sprint.id}",
@@ -1018,6 +1113,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
             "Device distance",
             "Normalised distance",
             "Calories (HR/MET)",
+            "Feel",
             "",
         ],
         rows,
@@ -1045,13 +1141,14 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
                     entry_select(form_id, "resistance", resistance_select_options(entry_resistance_value(lap.resistance))),
                     entry_input(form_id, "rpm", fmt_raw(lap.rpm), input_type="number", step="0.1", min_value="0"),
                     readonly_cell(fmt_num(lap.calories_mets, 1)),
+                    entry_feel_controls(form_id, lap),
                     save_button(form_id),
                 ],
                 f"lap-{lap.id}",
             )
         )
     return "".join(forms) + grouped_html_table(
-        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories (HR/MET)", ""],
+        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories (HR/MET)", "Feel", ""],
         rows,
     )
 
@@ -2029,7 +2126,7 @@ def render_review(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Review Queue</h2>
-  {raw_activity_table(queue_rows, circuits)}
+  {raw_activity_table(queue_rows, circuits, conn=conn)}
 </section>
 <section class="band">
   <h2>Import History</h2>
@@ -2073,7 +2170,12 @@ def review_activity_rows(conn: sqlite3.Connection, *, terminal: bool) -> list[sq
     ).fetchall()
 
 
-def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], readonly: bool = False) -> str:
+def raw_activity_table(
+    rows: list[sqlite3.Row],
+    circuits: list[sqlite3.Row],
+    readonly: bool = False,
+    conn: sqlite3.Connection | None = None,
+) -> str:
     if not rows:
         return '<div class="empty">No raw activities in this section.</div>'
     circuit_options = '<option value="">No circuit</option>' + "".join(
@@ -2092,7 +2194,7 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], rea
   <td>{fmt_num(row['raw_distance'], 3)}<br><span class="muted">{source_metric_summary(row)}</span></td>
   <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
   <td>{duplicate_match_label(row)}</td>
-  <td>{'' if readonly else review_actions(row, options)}</td>
+  <td>{'' if readonly else review_actions(row, options, conn)}</td>
 </tr>""")
     return f"""
 <table>
@@ -2129,7 +2231,7 @@ def duplicate_match_label(row: sqlite3.Row) -> str:
     return f"{escape(' - '.join(piece for piece in pieces if piece))}<br><span class=\"muted\">{escape(str(reason))}</span>"
 
 
-def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
+def review_actions(row: sqlite3.Row, circuit_options: str, conn: sqlite3.Connection | None = None) -> str:
     confirm_duplicate = ""
     if row["duplicate_entry_type"] and row["duplicate_entry_id"]:
         confirm_duplicate = f"""
@@ -2137,7 +2239,7 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
         <input type="hidden" name="id" value="{row['id']}">
         <button class="secondary" type="submit">Confirm duplicate</button>
       </form>"""
-    promote_form = promote_activity_form(row, circuit_options)
+    promote_form = promote_activity_form(row, circuit_options, conn)
     return f"""
     <div style="display:grid; gap:8px;">
       {confirm_duplicate}
@@ -2164,7 +2266,7 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
     </div>"""
 
 
-def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
+def promote_activity_form(row: sqlite3.Row, circuit_options: str, conn: sqlite3.Connection | None = None) -> str:
     payload = raw_payload_dict(row)
     performed_on = date_part(row["started_on"]) or ""
     duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
@@ -2174,27 +2276,77 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
     resistance = row_value(row, "default_resistance", 4)
     notes = default_promotion_notes(row)
     hr_note = hr_quality_note(payload)
+    entry_index = inferred_entry_index(conn, raw_type, performed_on)
+    imported_summary = review_import_summary(row, payload, duration_minutes, rpm, device_watts, entry_index)
+    missing_required = review_missing_required_inputs(row, performed_on)
     return f"""
       <form class="stack" method="post" action="/review/promote">
         <input type="hidden" name="id" value="{row['id']}">
+        <div class="muted">{imported_summary}</div>
         <label>Import as
           <select name="session_type">
             {select_option('sprint', raw_type)}
             {select_option('lap', raw_type)}
           </select>
         </label>
-        <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
-        <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
-        <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
+        {missing_required}
         {hr_note}
         <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
-        <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
-        <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
-        <label>Entry number<input name="entry_index" type="number" min="1"></label>
         <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
-        <label>Notes<input name="notes" value="{escape(notes)}"></label>
+        {session_feel_form_fields({})}
+        <details>
+          <summary>Import details</summary>
+          <div class="stack">
+            {'' if not performed_on else f'<label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>'}
+            <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
+            {'' if row['hr'] in (None, '') else f'<label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row["hr"])}" required></label>'}
+            <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
+            <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
+            <label>Entry number<input name="entry_index" type="number" min="1" value="{fmt_raw(entry_index)}"></label>
+            <label>Notes<input name="notes" value="{escape(notes)}"></label>
+          </div>
+        </details>
         <button type="submit">Import entry</button>
       </form>"""
+
+
+def review_import_summary(
+    row: sqlite3.Row,
+    payload: dict[str, object],
+    duration_minutes: float | None,
+    rpm: str,
+    device_watts: str,
+    entry_index: int | None,
+) -> str:
+    pieces = [
+        f"date {fmt_date(date_part(row['started_on']))}" if date_part(row["started_on"]) else "",
+        f"start {fmt_datetime(row['started_on'])}" if row["started_on"] else "",
+        f"time {fmt_minutes(duration_minutes)}" if duration_minutes is not None else "",
+        f"HR {fmt_num(row['hr'], 0)}" if row["hr"] not in (None, "") else "HR needed",
+        f"RPM {rpm}" if rpm else "",
+        f"device W {device_watts}" if device_watts else "",
+        f"raw distance {fmt_num(row['raw_distance'], 3)}" if row["raw_distance"] is not None else "",
+        f"next #{entry_index}" if entry_index is not None else "",
+    ]
+    hr_text = hr_quality_text(payload)
+    if hr_text:
+        pieces.append(hr_text)
+    return escape("; ".join(piece for piece in pieces if piece))
+
+
+def review_missing_required_inputs(row: sqlite3.Row, performed_on: str) -> str:
+    fields = []
+    if not performed_on:
+        fields.append('<label>Date<input name="performed_on" type="date" required></label>')
+    if row["hr"] in (None, ""):
+        fields.append('<label>HR<input name="hr" type="number" min="0" required></label>')
+    return "".join(fields)
+
+
+def inferred_entry_index(conn: sqlite3.Connection | None, entry_type: str, performed_on: str | None) -> int | None:
+    if conn is None or not performed_on:
+        return None
+    return next_entry_index(conn, entry_type, performed_on)
 
 
 def default_promotion_notes(row: sqlite3.Row) -> str:
@@ -4438,7 +4590,10 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     if rpm is None:
         rpm = maybe_float(str(payload.get("average_cadence"))) if payload.get("average_cadence") is not None else None
     entry_index = maybe_int(params.get("entry_index"))
+    if entry_index is None:
+        entry_index = next_entry_index(conn, session_type, performed_on)
     notes = empty_to_none(params.get("notes"))
+    feel = session_feel_values(params)
 
     if session_type == "lap":
         circuit_id = maybe_int(params.get("circuit_id")) or row["circuit_id"]
@@ -4448,9 +4603,11 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
             """
             INSERT INTO lap_entries (
                 performed_on, started_at, lap_index, circuit_id, lap_time_minutes,
-                hr, resistance, rpm, raw_activity_id, notes
+                hr, resistance, rpm, raw_activity_id, notes,
+                rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+                heat_flag, hydration_ok, food_ok, hit_wall
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 performed_on,
@@ -4463,6 +4620,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
                 rpm,
                 raw_id,
                 notes,
+                *feel,
             ),
         )
         entry_id = cursor.lastrowid
@@ -4472,9 +4630,11 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
             """
             INSERT INTO sprint_entries (
                 performed_on, started_at, sprint_index, duration_minutes,
-                rpm, device_watts, hr, resistance, device_distance, raw_activity_id, notes
+                rpm, device_watts, hr, resistance, device_distance, raw_activity_id, notes,
+                rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+                heat_flag, hydration_ok, food_ok, hit_wall
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 performed_on,
@@ -4488,6 +4648,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
                 row["raw_distance"],
                 raw_id,
                 notes,
+                *feel,
             ),
         )
         entry_id = cursor.lastrowid
@@ -4531,17 +4692,71 @@ def promotion_device_watts(params: dict[str, str], payload: dict[str, object]) -
     return maybe_float(str(average_watts)) if average_watts is not None else None
 
 
+def next_entry_index(conn: sqlite3.Connection, entry_type: str, performed_on: str) -> int:
+    if entry_type == "lap":
+        table = "lap_entries"
+        column = "lap_index"
+    else:
+        table = "sprint_entries"
+        column = "sprint_index"
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(MAX({column}), 0) + 1 AS next_index
+        FROM {table}
+        WHERE performed_on = ? AND {column} IS NOT NULL
+        """,
+        (performed_on,),
+    ).fetchone()
+    return int(row["next_index"] or 1)
+
+
+def session_feel_values(params: dict[str, object]) -> tuple[object, ...]:
+    return (
+        bounded_int(params.get("rpe"), 1, 10),
+        bounded_int(params.get("leg_fatigue"), 1, 5),
+        bounded_int(params.get("breathing_strain"), 1, 5),
+        bounded_int(params.get("energy_level"), 1, 5),
+        bounded_int(params.get("sleep_quality"), 1, 5),
+        checkbox_value(params.get("heat_flag")),
+        ternary_value(params.get("hydration_ok")),
+        ternary_value(params.get("food_ok")),
+        checkbox_value(params.get("hit_wall")),
+    )
+
+
+def bounded_int(value: object, minimum: int, maximum: int) -> int | None:
+    if value in (None, ""):
+        return None
+    number = int(float(str(value)))
+    if number < minimum or number > maximum:
+        raise ValueError(f"Value must be between {minimum} and {maximum}.")
+    return number
+
+
+def checkbox_value(value: object) -> int:
+    return 1 if value in (1, "1", True, "true", "on") else 0
+
+
+def ternary_value(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return 1 if str(value) == "1" else 0
+
+
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
     started_at = combine_entry_start(performed_on, params.get("started_at"))
     resistance = validated_resistance(params.get("resistance"))
+    feel = session_feel_values(params)
     conn.execute(
         """
         INSERT INTO sprint_entries (
             performed_on, started_at, day_number, sprint_index, duration_minutes,
-            rpm, device_watts, hr, resistance, device_distance, notes
+            rpm, device_watts, hr, resistance, device_distance, notes,
+            rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+            heat_flag, hydration_ok, food_ok, hit_wall
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             performed_on,
@@ -4555,6 +4770,7 @@ def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             resistance,
             maybe_float(params.get("device_distance")),
             empty_to_none(params.get("notes")),
+            *feel,
         ),
     )
     conn.commit()
@@ -4562,6 +4778,7 @@ def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
 
 def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     entry_id = int(required(params, "id"))
+    feel = session_feel_values(params)
     conn.execute(
         """
         UPDATE sprint_entries
@@ -4573,7 +4790,16 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
             device_watts = ?,
             hr = ?,
             resistance = ?,
-            device_distance = ?
+            device_distance = ?,
+            rpe = ?,
+            leg_fatigue = ?,
+            breathing_strain = ?,
+            energy_level = ?,
+            sleep_quality = ?,
+            heat_flag = ?,
+            hydration_ok = ?,
+            food_ok = ?,
+            hit_wall = ?
         WHERE id = ?
         """,
         (
@@ -4586,6 +4812,7 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
             maybe_int(params.get("hr")),
             validated_resistance(params.get("resistance")),
             maybe_float(params.get("device_distance")),
+            *feel,
             entry_id,
         ),
     )
@@ -4599,13 +4826,16 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
     resistance = validated_resistance(params.get("resistance"))
+    feel = session_feel_values(params)
     conn.execute(
         """
         INSERT INTO lap_entries (
             performed_on, started_at, lap_index, circuit_id, lap_time_minutes,
-            hr, resistance, rpm, notes
+            hr, resistance, rpm, notes,
+            rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+            heat_flag, hydration_ok, food_ok, hit_wall
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             performed_on,
@@ -4617,6 +4847,7 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             resistance,
             maybe_float(params.get("rpm")),
             empty_to_none(params.get("notes")),
+            *feel,
         ),
     )
     conn.commit()
@@ -4627,6 +4858,7 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     circuit_id = maybe_int(params.get("circuit_id"))
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
+    feel = session_feel_values(params)
     conn.execute(
         """
         UPDATE lap_entries
@@ -4637,7 +4869,16 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             lap_time_minutes = ?,
             hr = ?,
             resistance = ?,
-            rpm = ?
+            rpm = ?,
+            rpe = ?,
+            leg_fatigue = ?,
+            breathing_strain = ?,
+            energy_level = ?,
+            sleep_quality = ?,
+            heat_flag = ?,
+            hydration_ok = ?,
+            food_ok = ?,
+            hit_wall = ?
         WHERE id = ?
         """,
         (
@@ -4649,6 +4890,7 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             maybe_int(params.get("hr")),
             validated_resistance(params.get("resistance")),
             maybe_float(params.get("rpm")),
+            *feel,
             entry_id,
         ),
     )

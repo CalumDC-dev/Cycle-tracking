@@ -1444,6 +1444,61 @@ class WebActionTests(unittest.TestCase):
         self.assertAlmostEqual(sprint["rpm"], 119.5)
         self.assertAlmostEqual(sprint["device_watts"], 287.25)
 
+    def test_promote_raw_activity_infers_entry_index_and_stores_session_feel(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-10",
+                "sprint_index": "1",
+                "duration_minutes": "10",
+                "hr": "118",
+                "resistance": "4",
+            },
+        )
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "next-sprint",
+                "started_on": "2026-05-10T09:15",
+                "duration_seconds": "900",
+                "raw_distance": "10",
+                "hr": "124",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("next-sprint",)).fetchone()["id"]
+
+        promote_raw_activity(
+            self.conn,
+            {
+                "id": str(raw_id),
+                "session_type": "sprint",
+                "performed_on": "2026-05-10",
+                "hr": "124",
+                "rpe": "7",
+                "leg_fatigue": "4",
+                "breathing_strain": "2",
+                "energy_level": "3",
+                "sleep_quality": "2",
+                "heat_flag": "1",
+                "hydration_ok": "0",
+                "food_ok": "1",
+                "hit_wall": "1",
+            },
+        )
+
+        sprint = self.conn.execute("SELECT * FROM sprint_entries WHERE raw_activity_id = ?", (raw_id,)).fetchone()
+        self.assertEqual(sprint["sprint_index"], 2)
+        self.assertEqual(sprint["rpe"], 7)
+        self.assertEqual(sprint["leg_fatigue"], 4)
+        self.assertEqual(sprint["breathing_strain"], 2)
+        self.assertEqual(sprint["energy_level"], 3)
+        self.assertEqual(sprint["sleep_quality"], 2)
+        self.assertEqual(sprint["heat_flag"], 1)
+        self.assertEqual(sprint["hydration_ok"], 0)
+        self.assertEqual(sprint["food_ok"], 1)
+        self.assertEqual(sprint["hit_wall"], 1)
+
     def test_promote_activity_form_rounds_source_defaults_to_input_step(self):
         add_raw_activity(
             self.conn,
@@ -1464,6 +1519,40 @@ class WebActionTests(unittest.TestCase):
         self.assertIn('name="device_watts" type="number" step="0.1" min="0" value="347.7"', html)
         self.assertIn('name="duration_minutes" type="number" step="0.001" min="0" value="75.033"', html)
         self.assertIn('name="resistance" type="number" min="1" max="16" value="4" required', html)
+
+    def test_promote_activity_form_condenses_imported_metrics_and_infers_entry_number(self):
+        add_sprint_entry(
+            self.conn,
+            {
+                "performed_on": "2026-05-10",
+                "sprint_index": "1",
+                "duration_minutes": "10",
+                "hr": "118",
+                "resistance": "4",
+            },
+        )
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "condensed-form",
+                "started_on": "2026-05-10T10:15",
+                "duration_seconds": "600",
+                "raw_distance": "8",
+                "hr": "122",
+                "raw_payload": json.dumps({"average_cadence": 120.0, "average_watts": 300.0}),
+            },
+        )
+        row = self.conn.execute("SELECT * FROM raw_activities WHERE source_activity_id = ?", ("condensed-form",)).fetchone()
+
+        html = promote_activity_form(row, '<option value="">No circuit</option>', self.conn)
+
+        self.assertIn("date 10-05-2026", html)
+        self.assertIn("HR 122", html)
+        self.assertIn("next #2", html)
+        self.assertIn("<summary>Session feel</summary>", html)
+        self.assertIn("<summary>Import details</summary>", html)
+        self.assertIn('name="entry_index" type="number" min="1" value="2"', html)
 
     def test_promote_raw_activity_defaults_missing_resistance_to_four(self):
         add_raw_activity(

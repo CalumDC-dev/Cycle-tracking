@@ -110,7 +110,16 @@ CREATE TABLE IF NOT EXISTS sprint_entries (
     resistance INTEGER,
     device_distance REAL,
     raw_activity_id INTEGER REFERENCES raw_activities(id),
-    notes TEXT
+    notes TEXT,
+    rpe INTEGER,
+    leg_fatigue INTEGER,
+    breathing_strain INTEGER,
+    energy_level INTEGER,
+    sleep_quality INTEGER,
+    heat_flag INTEGER NOT NULL DEFAULT 0,
+    hydration_ok INTEGER,
+    food_ok INTEGER,
+    hit_wall INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS lap_entries (
@@ -124,7 +133,16 @@ CREATE TABLE IF NOT EXISTS lap_entries (
     resistance INTEGER,
     rpm REAL,
     raw_activity_id INTEGER REFERENCES raw_activities(id),
-    notes TEXT
+    notes TEXT,
+    rpe INTEGER,
+    leg_fatigue INTEGER,
+    breathing_strain INTEGER,
+    energy_level INTEGER,
+    sleep_quality INTEGER,
+    heat_flag INTEGER NOT NULL DEFAULT 0,
+    hydration_ok INTEGER,
+    food_ok INTEGER,
+    hit_wall INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS duplicate_dismissals (
@@ -193,6 +211,16 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "calibration_profiles", "flywheel_diameter_mm", "REAL NOT NULL DEFAULT 150.0")
     _ensure_column(conn, "sprint_entries", "started_at", "TEXT")
     _ensure_column(conn, "lap_entries", "started_at", "TEXT")
+    for table in ("sprint_entries", "lap_entries"):
+        _ensure_column(conn, table, "rpe", "INTEGER")
+        _ensure_column(conn, table, "leg_fatigue", "INTEGER")
+        _ensure_column(conn, table, "breathing_strain", "INTEGER")
+        _ensure_column(conn, table, "energy_level", "INTEGER")
+        _ensure_column(conn, table, "sleep_quality", "INTEGER")
+        _ensure_column(conn, table, "heat_flag", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, table, "hydration_ok", "INTEGER")
+        _ensure_column(conn, table, "food_ok", "INTEGER")
+        _ensure_column(conn, table, "hit_wall", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "raw_activities", "hr", "INTEGER")
     _ensure_column(conn, "raw_activities", "duplicate_entry_type", "TEXT")
     _ensure_column(conn, "raw_activities", "duplicate_entry_id", "INTEGER")
