@@ -469,6 +469,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/classify":
                 classify_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/review/reopen":
+                reopen_raw_activity(conn, params)
+                self._redirect("/review")
             elif parsed.path == "/review/confirm-duplicate":
                 confirm_duplicate_activity(conn, params)
                 self._redirect("/review")
@@ -2194,13 +2197,23 @@ def raw_activity_table(
   <td>{fmt_num(row['raw_distance'], 3)}<br><span class="muted">{source_metric_summary(row)}</span></td>
   <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
   <td>{duplicate_match_label(row)}</td>
-  <td>{'' if readonly else review_actions(row, options, conn)}</td>
+  <td>{history_actions(row) if readonly else review_actions(row, options, conn)}</td>
 </tr>""")
     return f"""
 <table>
   <thead><tr><th>Source</th><th>Title</th><th>Start</th><th>Raw distance</th><th>Status</th><th>Possible match</th><th>Review</th></tr></thead>
   <tbody>{''.join(rendered)}</tbody>
 </table>"""
+
+
+def history_actions(row: sqlite3.Row) -> str:
+    if row["review_status"] != "ignored":
+        return '<span class="muted">Handled</span>'
+    return f"""
+      <form method="post" action="/review/reopen">
+        <input type="hidden" name="id" value="{row['id']}">
+        <button class="secondary" type="submit">Reopen review</button>
+      </form>"""
 
 
 def review_status_label(row: sqlite3.Row) -> str:
@@ -2295,16 +2308,8 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str, conn: sqlite3.
         <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
         {session_feel_form_fields({})}
         <details>
-          <summary>Import details</summary>
-          <div class="stack">
-            {'' if not performed_on else f'<label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>'}
-            <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
-            {'' if row['hr'] in (None, '') else f'<label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row["hr"])}" required></label>'}
-            <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
-            <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
-            <label>Entry number<input name="entry_index" type="number" min="1" value="{fmt_raw(entry_index)}"></label>
-            <label>Notes<input name="notes" value="{escape(notes)}"></label>
-          </div>
+          <summary>Imported values</summary>
+          <div class="muted">{escape(import_review_detail_text(row, payload, duration_minutes, rpm, device_watts, entry_index, notes))}</div>
         </details>
         <button type="submit">Import entry</button>
       </form>"""
@@ -2341,6 +2346,32 @@ def review_missing_required_inputs(row: sqlite3.Row, performed_on: str) -> str:
     if row["hr"] in (None, ""):
         fields.append('<label>HR<input name="hr" type="number" min="0" required></label>')
     return "".join(fields)
+
+
+def import_review_detail_text(
+    row: sqlite3.Row,
+    payload: dict[str, object],
+    duration_minutes: float | None,
+    rpm: str,
+    device_watts: str,
+    entry_index: int | None,
+    notes: str,
+) -> str:
+    pieces = [
+        f"Date: {fmt_date(date_part(row['started_on']))}" if date_part(row["started_on"]) else "Date: not detected",
+        f"Start: {fmt_datetime(row['started_on'])}" if row["started_on"] else "",
+        f"Duration: {fmt_minutes(duration_minutes)}" if duration_minutes is not None else "Duration: not detected",
+        f"HR: {fmt_num(row['hr'], 0)}" if row["hr"] not in (None, "") else "HR: not detected",
+        f"RPM: {rpm}" if rpm else "RPM: not detected",
+        f"Device watts: {device_watts}" if device_watts else "Device watts: not detected",
+        f"Raw distance: {fmt_num(row['raw_distance'], 3)}" if row["raw_distance"] is not None else "",
+        f"Entry number: {entry_index}" if entry_index is not None else "",
+        f"Notes: {notes}" if notes else "",
+    ]
+    hr_text = hr_quality_text(payload)
+    if hr_text:
+        pieces.append(hr_text)
+    return "; ".join(piece for piece in pieces if piece)
 
 
 def inferred_entry_index(conn: sqlite3.Connection | None, entry_type: str, performed_on: str | None) -> int | None:
@@ -4433,6 +4464,8 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             raw_distance=raw_distance,
             hr=hr,
             raw_payload=raw_payload,
+            suggestion=suggestion,
+            duplicate=duplicate,
         )
     elif duplicate and duplicate["confidence"] >= STRONG_DUPLICATE_THRESHOLD:
         backfill_duplicate_started_at(conn, duplicate, started_on)
@@ -4450,6 +4483,8 @@ def enrich_existing_raw_activity(
     raw_distance: float | None,
     hr: int | None,
     raw_payload: str | None,
+    suggestion: dict[str, object] | None = None,
+    duplicate: dict[str, object] | None = None,
 ) -> None:
     if source_activity_id is None:
         return
@@ -4469,6 +4504,27 @@ def enrich_existing_raw_activity(
         }
     if hr is None and existing_duplicate:
         hr = hr_for_duplicate(conn, existing_duplicate)
+    reopen_ignored = row["review_status"] == "ignored" and not raw_activity_has_entry(conn, row["id"])
+    if reopen_ignored and suggestion is not None:
+        session_type = str(suggestion["session_type"])
+        circuit_id = suggestion.get("circuit_id")
+        review_status = reopened_review_status(session_type, hr)
+        classification_confidence = suggestion["confidence"]
+        classification_reason = f"Reopened from repeat upload; {suggestion['reason']}"
+        duplicate_entry_type = duplicate["entry_type"] if duplicate else row["duplicate_entry_type"]
+        duplicate_entry_id = duplicate["entry_id"] if duplicate else row["duplicate_entry_id"]
+        duplicate_confidence = duplicate["confidence"] if duplicate else row["duplicate_confidence"]
+        duplicate_reason = duplicate["reason"] if duplicate else row["duplicate_reason"]
+    else:
+        session_type = row["session_type"]
+        circuit_id = row["circuit_id"]
+        review_status = row["review_status"]
+        classification_confidence = row["classification_confidence"]
+        classification_reason = row["classification_reason"]
+        duplicate_entry_type = row["duplicate_entry_type"]
+        duplicate_entry_id = row["duplicate_entry_id"]
+        duplicate_confidence = row["duplicate_confidence"]
+        duplicate_reason = row["duplicate_reason"]
     conn.execute(
         """
         UPDATE raw_activities
@@ -4477,7 +4533,16 @@ def enrich_existing_raw_activity(
             duration_seconds = ?,
             raw_distance = ?,
             hr = ?,
-            raw_payload = ?
+            raw_payload = ?,
+            review_status = ?,
+            session_type = ?,
+            circuit_id = ?,
+            classification_confidence = ?,
+            classification_reason = ?,
+            duplicate_entry_type = ?,
+            duplicate_entry_id = ?,
+            duplicate_confidence = ?,
+            duplicate_reason = ?
         WHERE id = ?
         """,
         (
@@ -4487,6 +4552,15 @@ def enrich_existing_raw_activity(
             prefer_existing(row["raw_distance"], raw_distance),
             prefer_existing(row["hr"], hr),
             merge_raw_payload(row["raw_payload"], raw_payload),
+            review_status,
+            session_type,
+            circuit_id,
+            classification_confidence,
+            classification_reason,
+            duplicate_entry_type,
+            duplicate_entry_id,
+            duplicate_confidence,
+            duplicate_reason,
             row["id"],
         ),
     )
@@ -4503,6 +4577,13 @@ def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     circuit_id = maybe_int(params.get("circuit_id")) if session_type == "lap" else None
     if session_type == "ignore":
         review_status = "ignored"
+        existing = conn.execute(
+            "SELECT session_type, circuit_id FROM raw_activities WHERE id = ?",
+            (int(params["id"]),),
+        ).fetchone()
+        if existing is not None:
+            session_type = existing["session_type"]
+            circuit_id = existing["circuit_id"]
     elif session_type in ("lap", "sprint"):
         review_status = "ready_to_import"
     else:
@@ -4520,6 +4601,35 @@ def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
         (session_type, circuit_id, review_status, int(params["id"])),
     )
     conn.commit()
+
+
+def reopen_raw_activity(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    raw_id = int(required(params, "id"))
+    row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+    if row is None:
+        raise ValueError("Raw activity was not found.")
+    if row["review_status"] != "ignored":
+        return
+    if raw_activity_has_entry(conn, raw_id):
+        raise ValueError("Raw activity is already linked to an entry.")
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET review_status = ?,
+            classification_reason = 'Reopened from import history'
+        WHERE id = ?
+        """,
+        (reopened_review_status(row["session_type"], row["hr"]), raw_id),
+    )
+    conn.commit()
+
+
+def reopened_review_status(session_type: object, hr: object) -> str:
+    if hr in (None, ""):
+        return "needs_hr"
+    if str(session_type) in ("lap", "sprint"):
+        return "ready_to_import"
+    return "needs_review"
 
 
 def confirm_duplicate_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -4592,7 +4702,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     entry_index = maybe_int(params.get("entry_index"))
     if entry_index is None:
         entry_index = next_entry_index(conn, session_type, performed_on)
-    notes = empty_to_none(params.get("notes"))
+    notes = empty_to_none(params.get("notes")) or default_promotion_notes(row)
     feel = session_feel_values(params)
 
     if session_type == "lap":

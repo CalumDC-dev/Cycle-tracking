@@ -37,6 +37,7 @@ from workout_tracker.web import (
     render_maintenance,
     render_review,
     review_actions,
+    reopen_raw_activity,
     calibration_coverage_rows,
     circuit_progress_rows,
     estimated_threshold_watts,
@@ -1499,7 +1500,7 @@ class WebActionTests(unittest.TestCase):
         self.assertEqual(sprint["food_ok"], 1)
         self.assertEqual(sprint["hit_wall"], 1)
 
-    def test_promote_activity_form_rounds_source_defaults_to_input_step(self):
+    def test_promote_activity_form_summarises_source_defaults_without_metric_inputs(self):
         add_raw_activity(
             self.conn,
             {
@@ -1515,9 +1516,13 @@ class WebActionTests(unittest.TestCase):
 
         html = promote_activity_form(row, '<option value="">No circuit</option>')
 
-        self.assertIn('name="rpm" type="number" step="0.1" min="0" value="132.3"', html)
-        self.assertIn('name="device_watts" type="number" step="0.1" min="0" value="347.7"', html)
-        self.assertIn('name="duration_minutes" type="number" step="0.001" min="0" value="75.033"', html)
+        self.assertIn("RPM 132.3", html)
+        self.assertIn("device W 347.7", html)
+        self.assertIn("time 1:15:02", html)
+        self.assertIn("RPM: 132.3", html)
+        self.assertNotIn('name="rpm"', html)
+        self.assertNotIn('name="device_watts"', html)
+        self.assertNotIn('name="duration_minutes"', html)
         self.assertIn('name="resistance" type="number" min="1" max="16" value="4" required', html)
 
     def test_promote_activity_form_condenses_imported_metrics_and_infers_entry_number(self):
@@ -1551,8 +1556,9 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("HR 122", html)
         self.assertIn("next #2", html)
         self.assertIn("<summary>Session feel</summary>", html)
-        self.assertIn("<summary>Import details</summary>", html)
-        self.assertIn('name="entry_index" type="number" min="1" value="2"', html)
+        self.assertIn("<summary>Imported values</summary>", html)
+        self.assertNotIn('name="entry_index"', html)
+        self.assertNotIn('name="performed_on"', html)
 
     def test_promote_raw_activity_defaults_missing_resistance_to_four(self):
         add_raw_activity(
@@ -1598,6 +1604,63 @@ class WebActionTests(unittest.TestCase):
 
         self.assertIn('name="session_type" value="ignore"', html)
         self.assertIn("Ignore activity", html)
+
+    def test_reopen_raw_activity_restores_ignored_activity_to_review(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "restore-me",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "0.01",
+                "hr": "118",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("restore-me",)).fetchone()["id"]
+        classify_activity(self.conn, {"id": str(raw_id), "session_type": "ignore"})
+
+        html = render_review(self.conn)
+        self.assertIn("Reopen review", html)
+
+        reopen_raw_activity(self.conn, {"id": str(raw_id)})
+
+        raw = self.conn.execute("SELECT review_status FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+        self.assertEqual(raw["review_status"], "ready_to_import")
+
+    def test_repeat_import_reopens_ignored_activity(self):
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "ignored-repeat",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "0.01",
+            },
+        )
+        raw_id = self.conn.execute("SELECT id FROM raw_activities WHERE source_activity_id = ?", ("ignored-repeat",)).fetchone()["id"]
+        classify_activity(self.conn, {"id": str(raw_id), "session_type": "ignore"})
+
+        add_raw_activity(
+            self.conn,
+            {
+                "source": "strava",
+                "source_activity_id": "ignored-repeat",
+                "started_on": "2026-05-10T06:15",
+                "duration_seconds": "300",
+                "raw_distance": "0.01",
+                "hr": "119",
+            },
+        )
+
+        raw = self.conn.execute(
+            "SELECT review_status, hr, classification_reason FROM raw_activities WHERE id = ?",
+            (raw_id,),
+        ).fetchone()
+        self.assertEqual(raw["review_status"], "ready_to_import")
+        self.assertEqual(raw["hr"], 119)
+        self.assertIn("Reopened from repeat upload", raw["classification_reason"])
 
     def test_grouped_table_marks_day_groups(self):
         html = grouped_table(["Date", "Value"], [["2026-05-10", 1], ["2026-05-10", 2], ["2026-05-11", 3]])
