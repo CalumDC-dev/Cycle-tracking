@@ -25,6 +25,7 @@ from .activity_metrics import (
     source_metric_rows,
 )
 from .calculations import (
+    KM_TO_MILES,
     calculated_laps,
     calculated_sprints,
     dashboard_metrics,
@@ -131,6 +132,74 @@ main {
   margin-top: 8px;
   font-size: 24px;
   line-height: 1.15;
+}
+.challenge-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.35fr) minmax(260px, .65fr);
+  gap: 16px;
+  align-items: start;
+}
+.challenge-map {
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+.challenge-route-base {
+  fill: none;
+  stroke: #c6d2de;
+  stroke-width: 10;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.challenge-route-progress {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 11;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.challenge-route-link {
+  fill: none;
+  stroke: #9aaabd;
+  stroke-width: 4;
+  stroke-dasharray: 8 8;
+  stroke-linecap: round;
+}
+.challenge-marker {
+  fill: var(--blue);
+  stroke: #fff;
+  stroke-width: 3;
+}
+.challenge-label {
+  fill: var(--ink);
+  font-size: 16px;
+  font-weight: 700;
+}
+.challenge-small {
+  fill: var(--muted);
+  font-size: 13px;
+}
+.challenge-bar {
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: #edf2f7;
+}
+.challenge-bar span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+.challenge-panel {
+  display: grid;
+  gap: 12px;
+}
+.challenge-note {
+  color: var(--muted);
+  font-size: 13px;
 }
 .progress-cards {
   display: grid;
@@ -471,6 +540,7 @@ button.secondary {
 @media (max-width: 720px) {
   main { padding: 14px; }
   form.inline { grid-template-columns: 1fr; }
+  .challenge-layout { grid-template-columns: 1fr; }
   .review-dialog-body { grid-template-columns: 1fr; }
   svg.chart-large { min-height: 360px; }
   table { font-size: 13px; }
@@ -528,6 +598,12 @@ STRONG_DUPLICATE_THRESHOLD = 0.85
 POSSIBLE_DUPLICATE_THRESHOLD = 0.6
 MIN_RESISTANCE = 1
 MAX_RESISTANCE = 16
+UK_COASTLINE_CHALLENGE_KEY = "uk_coastline"
+UK_COASTLINE_CHALLENGE_NAME = "UK Coastline Challenge"
+UK_COASTLINE_TOTAL_MILES = 11073.0
+UK_COASTLINE_INITIAL_MILES = 5222.0
+UK_COASTLINE_START = "North Shields"
+UK_COASTLINE_DIRECTION = "Clockwise"
 
 
 @dataclass(frozen=True)
@@ -622,6 +698,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/promote":
                 promote_raw_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/challenge/progress/add":
+                add_challenge_progress(conn, params)
+                self._redirect("/")
             elif parsed.path == "/entries/sprint/add":
                 add_sprint_entry(conn, params)
                 self._redirect("/entries")
@@ -777,6 +856,8 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
     weekly_distance = metrics["weekly_distance"]
     latest_week = weekly_distance[0] if weekly_distance else None
     source_rows = source_metric_rows(conn)
+    challenge = latest_challenge_progress(conn)
+    personal_miles = km_to_miles(metrics["total_distance"] or 0)
     calories = [(row["date"], row["total_calories"]) for row in daily]
     watts = [(row["date"], row["average_watts"] or 0) for row in daily]
     mass = [(row["measured_on"], row["mass_kg"]) for row in metrics["mass"]]
@@ -814,6 +895,10 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 <section class="band">
   <h2>Weekly Distance</h2>
   {weekly_distance_table(weekly_distance)}
+</section>
+<section class="band">
+  <h2>Coastline Challenge</h2>
+  {coastline_challenge_panel(challenge, personal_miles)}
 </section>
 <section class="band">
   <h2>Trends</h2>
@@ -857,6 +942,121 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
   </div>
 </section>
 """
+
+
+def coastline_challenge_panel(challenge: dict[str, object], personal_miles: float) -> str:
+    team_miles = float(challenge["team_miles"])
+    progress_ratio = challenge_progress_ratio(team_miles)
+    remaining = max(UK_COASTLINE_TOTAL_MILES - team_miles, 0)
+    updated_on = str(challenge.get("updated_on") or "")
+    update_value = updated_on or today_iso()
+    notes = str(challenge.get("notes") or "")
+    saved_note = "" if challenge.get("saved") else "Default value shown until the first weekly update is saved."
+    return f"""
+<div class="challenge-layout">
+  <div>
+    {coastline_challenge_svg(progress_ratio, team_miles)}
+    <div class="challenge-note">Stylised route for progress only; distance target remains {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles.</div>
+  </div>
+  <div class="challenge-panel">
+    <div class="metrics">
+      {metric("Team miles", fmt_num(team_miles, 0), "green")}
+      {metric("Complete", fmt_percent(progress_ratio), "green")}
+      {metric("Remaining", fmt_num(remaining, 0), "amber")}
+      {metric("Your logged miles", fmt_num(personal_miles, 1), "blue")}
+    </div>
+    <div>
+      <div class="challenge-bar"><span style="width:{progress_ratio * 100:.2f}%"></span></div>
+      <div class="challenge-note">{challenge_update_summary(challenge)}</div>
+      <div class="challenge-note">{escape(saved_note)}</div>
+    </div>
+    <form class="stack" method="post" action="/challenge/progress/add">
+      <label>Updated on<input name="updated_on" type="date" value="{escape(update_value)}" required></label>
+      <label>Team miles<input name="team_miles" type="number" step="0.1" min="0" max="{fmt_raw(UK_COASTLINE_TOTAL_MILES)}" value="{fmt_raw(team_miles)}" required></label>
+      <label>Notes<input name="notes" value="{escape(notes)}" placeholder="Weekly charity update"></label>
+      <button type="submit">Save progress</button>
+    </form>
+    <div class="challenge-note">Route: {escape(UK_COASTLINE_START)} start, {escape(UK_COASTLINE_DIRECTION.lower())}; includes a Northern Ireland inset loop for the UK-wide challenge.</div>
+  </div>
+</div>"""
+
+
+def challenge_update_summary(challenge: dict[str, object]) -> str:
+    if not challenge.get("saved"):
+        return "Latest update: default starting value."
+    updated_on = fmt_date(challenge.get("updated_on"))
+    notes = str(challenge.get("notes") or "")
+    if notes:
+        return f"Latest update: {escape(updated_on)}; {escape(notes)}"
+    return f"Latest update: {escape(updated_on)}"
+
+
+def coastline_challenge_svg(progress_ratio: float, team_miles: float) -> str:
+    progress_units = progress_ratio * 1000
+    remaining = max(UK_COASTLINE_TOTAL_MILES - team_miles, 0)
+    route_path = (
+        "M 418 148 "
+        "C 466 176 482 232 462 286 "
+        "C 450 340 493 374 454 430 "
+        "C 414 486 346 496 306 462 "
+        "C 276 437 247 438 222 468 "
+        "C 188 509 126 488 130 428 "
+        "C 134 372 176 352 162 304 "
+        "C 148 254 198 232 184 184 "
+        "C 168 126 211 70 270 76 "
+        "C 318 82 338 112 362 100 "
+        "C 390 86 405 116 418 148 "
+        "M 146 340 "
+        "C 105 322 94 278 126 250 "
+        "C 164 218 212 252 198 304 "
+        "C 188 338 166 350 146 340"
+    )
+    return f"""
+<svg class="challenge-map" viewBox="0 0 620 560" role="img" aria-label="{escape(UK_COASTLINE_CHALLENGE_NAME)} progress map">
+  <text x="28" y="34" class="challenge-label">{escape(UK_COASTLINE_CHALLENGE_NAME)}</text>
+  <text x="28" y="56" class="challenge-small">{fmt_num(team_miles, 0)} of {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles complete; {fmt_num(remaining, 0)} remaining</text>
+  <path d="M 418 148 C 540 154 548 388 455 430" class="challenge-route-link" />
+  <path d="{route_path}" class="challenge-route-base" pathLength="1000" />
+  <path d="{route_path}" class="challenge-route-progress" pathLength="1000" stroke-dasharray="{progress_units:.2f} 1000" />
+  <circle cx="418" cy="148" r="8" class="challenge-marker" />
+  <text x="432" y="143" class="challenge-small">Start</text>
+  <text x="432" y="159" class="challenge-small">{escape(UK_COASTLINE_START)}</text>
+  <text x="452" y="308" class="challenge-small">Clockwise</text>
+  <text x="105" y="236" class="challenge-small">Northern Ireland</text>
+  <text x="235" y="532" class="challenge-small">Progress line follows the route from the start point</text>
+</svg>"""
+
+
+def latest_challenge_progress(conn: sqlite3.Connection) -> dict[str, object]:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM challenge_progress
+        WHERE challenge_key = ?
+        ORDER BY updated_on DESC, id DESC
+        LIMIT 1
+        """,
+        (UK_COASTLINE_CHALLENGE_KEY,),
+    ).fetchone()
+    if row:
+        return {
+            "team_miles": float(row["team_miles"]),
+            "updated_on": row["updated_on"],
+            "notes": row["notes"],
+            "saved": True,
+        }
+    return {
+        "team_miles": UK_COASTLINE_INITIAL_MILES,
+        "updated_on": "",
+        "notes": "",
+        "saved": False,
+    }
+
+
+def challenge_progress_ratio(team_miles: float) -> float:
+    if UK_COASTLINE_TOTAL_MILES <= 0:
+        return 0.0
+    return max(0.0, min(float(team_miles) / UK_COASTLINE_TOTAL_MILES, 1.0))
 
 
 def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = None) -> str:
@@ -3873,6 +4073,12 @@ def distance_km_miles(row: dict[str, object] | None) -> str:
     return f"{fmt_num(row.get('distance_km'), 2)} km / {fmt_num(row.get('distance_miles'), 2)} mi"
 
 
+def km_to_miles(value: object) -> float:
+    if value in (None, ""):
+        return 0.0
+    return float(value) * KM_TO_MILES
+
+
 def best_laps_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Circuit", "Best time", "Date", "Length", "Average speed"],
@@ -5572,6 +5778,29 @@ def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, 
     conn.commit()
 
 
+def add_challenge_progress(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    team_miles = maybe_float(str(required(params, "team_miles")))
+    if team_miles is None or team_miles < 0:
+        raise ValueError("Team miles must be zero or greater.")
+    if team_miles > UK_COASTLINE_TOTAL_MILES:
+        raise ValueError(f"Team miles cannot exceed {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)}.")
+    conn.execute(
+        """
+        INSERT INTO challenge_progress (
+            challenge_key, updated_on, team_miles, notes
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            UK_COASTLINE_CHALLENGE_KEY,
+            required(params, "updated_on"),
+            team_miles,
+            empty_to_none(params.get("notes")),
+        ),
+    )
+    conn.commit()
+
+
 def add_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.execute(
         """
@@ -5826,6 +6055,10 @@ def duration_seconds_to_minutes(value: object) -> float | None:
     if value is None or value == "":
         return None
     return float(value) / 60
+
+
+def today_iso() -> str:
+    return datetime.now().date().isoformat()
 
 
 def fmt_date(value: object) -> str:

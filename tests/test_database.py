@@ -116,6 +116,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         provenance = conn.execute("SELECT provenance FROM resistance_scaling WHERE resistance = 4").fetchone()[0]
         self.assertEqual(provenance, "manual")
         self.assertTrue(self._table_exists(conn, "duplicate_dismissals"))
+        self.assertTrue(self._table_exists(conn, "challenge_progress"))
         conn.close()
 
     def _columns(self, conn: sqlite3.Connection, table: str) -> set[str]:

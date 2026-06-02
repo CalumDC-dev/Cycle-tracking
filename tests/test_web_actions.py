@@ -12,6 +12,7 @@ from workout_tracker.web import (
     add_raw_activity,
     add_lap_entry,
     add_mass_log,
+    add_challenge_progress,
     add_resistance_calibration_test,
     add_sprint_entry,
     calculate_resistance_calibration_preview,
@@ -379,6 +380,34 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("9:00", html)
         self.assertIn("6.00", html)
         self.assertIn("3.73", html)
+
+    def test_render_dashboard_shows_coastline_challenge_progress(self):
+        html = render_dashboard(self.conn)
+
+        self.assertIn("Coastline Challenge", html)
+        self.assertIn("UK Coastline Challenge", html)
+        self.assertIn("5,222", html)
+        self.assertIn("11,073", html)
+        self.assertIn("North Shields", html)
+        self.assertIn("Save progress", html)
+
+    def test_add_challenge_progress_updates_dashboard_value(self):
+        add_challenge_progress(
+            self.conn,
+            {
+                "updated_on": "2026-06-08",
+                "team_miles": "5300",
+                "notes": "Week two",
+            },
+        )
+
+        row = self.conn.execute("SELECT * FROM challenge_progress WHERE challenge_key = ?", ("uk_coastline",)).fetchone()
+        html = render_dashboard(self.conn)
+
+        self.assertEqual(row["team_miles"], 5300)
+        self.assertIn("5,300", html)
+        self.assertIn("08-06-2026", html)
+        self.assertIn("Week two", html)
 
     def test_maintenance_flags_possible_manual_duplicate_entries(self):
         add_sprint_entry(

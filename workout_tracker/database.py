@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS mass_log (
     mass_kg REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS challenge_progress (
+    id INTEGER PRIMARY KEY,
+    challenge_key TEXT NOT NULL,
+    updated_on TEXT NOT NULL,
+    team_miles REAL NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS circuits (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -166,6 +175,7 @@ CREATE TABLE IF NOT EXISTS import_log (
 CREATE INDEX IF NOT EXISTS idx_sprint_entries_performed_on ON sprint_entries(performed_on);
 CREATE INDEX IF NOT EXISTS idx_lap_entries_performed_on ON lap_entries(performed_on);
 CREATE INDEX IF NOT EXISTS idx_raw_activities_review_status ON raw_activities(review_status);
+CREATE INDEX IF NOT EXISTS idx_challenge_progress_key_date ON challenge_progress(challenge_key, updated_on);
 """
 
 
@@ -192,6 +202,7 @@ def reset_db(conn: sqlite3.Connection) -> None:
         "sprint_entries",
         "raw_activities",
         "circuits",
+        "challenge_progress",
         "mass_log",
         "met_lookup",
         "resistance_calibration_tests",
