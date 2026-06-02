@@ -313,6 +313,12 @@ button {
   background: var(--blue);
   cursor: pointer;
 }
+button[disabled] {
+  border-color: #b8c4d0;
+  color: #6f7d8c;
+  background: #edf2f7;
+  cursor: not-allowed;
+}
 button.secondary {
   border-color: #8091a5;
   color: var(--ink);
@@ -332,6 +338,93 @@ button.secondary {
   border-radius: 6px;
 }
 .muted { color: var(--muted); }
+.review-actions {
+  display: grid;
+  gap: 8px;
+  min-width: 170px;
+}
+.review-actions form,
+.review-actions button {
+  width: 100%;
+}
+.review-import-form {
+  display: grid;
+  gap: 8px;
+}
+.review-dialog {
+  width: min(920px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 22px 60px rgba(20, 32, 44, .22);
+}
+.review-dialog::backdrop {
+  background: rgba(18, 32, 44, .36);
+}
+.review-dialog-head {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: start;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #f8fbfd;
+}
+.review-dialog-head h3 {
+  margin: 0;
+  font-size: 18px;
+}
+.review-dialog-body {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+  max-height: calc(min(760px, 100vh - 32px) - 122px);
+}
+.review-dialog-section {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.review-dialog-section h4 {
+  margin: 0;
+  font-size: 15px;
+}
+.review-dialog .stack {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.readonly-grid {
+  display: grid;
+  gap: 8px;
+}
+.readonly-item {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 9px;
+  background: #fbfcfe;
+}
+.readonly-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.readonly-item strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--line);
+}
 .table-scroll {
   overflow-x: auto;
 }
@@ -378,9 +471,57 @@ button.secondary {
 @media (max-width: 720px) {
   main { padding: 14px; }
   form.inline { grid-template-columns: 1fr; }
+  .review-dialog-body { grid-template-columns: 1fr; }
   svg.chart-large { min-height: 360px; }
   table { font-size: 13px; }
 }
+"""
+
+REVIEW_DIALOG_SCRIPT = r"""
+document.addEventListener("click", function (event) {
+  const openButton = event.target.closest("[data-open-import]");
+  if (openButton) {
+    const dialog = document.getElementById(openButton.dataset.openImport);
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "open");
+    }
+    return;
+  }
+
+  const closeButton = event.target.closest("[data-close-import]");
+  if (closeButton) {
+    const dialog = closeButton.closest("dialog");
+    if (!dialog) return;
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+    return;
+  }
+
+  const readyButton = event.target.closest("[data-ready-import]");
+  if (readyButton) {
+    const dialog = readyButton.closest("dialog");
+    const form = dialog ? document.getElementById(dialog.dataset.formId) : null;
+    if (!dialog || !form) return;
+    if (!form.reportValidity()) return;
+    const submitButton = form.querySelector("[data-import-submit]");
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = "Import entry";
+      submitButton.focus();
+    }
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+  }
+});
 """
 
 STRONG_DUPLICATE_THRESHOLD = 0.85
@@ -623,6 +764,9 @@ def page(title: str, body: str, active: str) -> str:
     <nav>{links}</nav>
   </header>
   <main>{body}</main>
+  <script>
+{REVIEW_DIALOG_SCRIPT}
+  </script>
 </body>
 </html>"""
 
@@ -2254,26 +2398,12 @@ def review_actions(row: sqlite3.Row, circuit_options: str, conn: sqlite3.Connect
       </form>"""
     promote_form = promote_activity_form(row, circuit_options, conn)
     return f"""
-    <div style="display:grid; gap:8px;">
+    <div class="review-actions">
       {confirm_duplicate}
       <form method="post" action="/review/classify">
         <input type="hidden" name="id" value="{row['id']}">
         <input type="hidden" name="session_type" value="ignore">
         <button class="secondary" type="submit">Ignore activity</button>
-      </form>
-      <form class="stack" method="post" action="/review/classify">
-        <input type="hidden" name="id" value="{row['id']}">
-        <label>Type
-          <select name="session_type">
-            {select_option('unknown', row['session_type'])}
-            {select_option('lap', row['session_type'])}
-            {select_option('sprint', row['session_type'])}
-            {select_option('endurance', row['session_type'])}
-            {select_option('ignore', row['session_type'])}
-          </select>
-        </label>
-        <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
-        <button type="submit">Confirm</button>
       </form>
       {promote_form}
     </div>"""
@@ -2292,26 +2422,50 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str, conn: sqlite3.
     entry_index = inferred_entry_index(conn, raw_type, performed_on)
     imported_summary = review_import_summary(row, payload, duration_minutes, rpm, device_watts, entry_index)
     missing_required = review_missing_required_inputs(row, performed_on)
+    form_id = f"promote-activity-{row['id']}"
+    dialog_id = f"prepare-import-{row['id']}"
     return f"""
-      <form class="stack" method="post" action="/review/promote">
+      <button class="secondary" type="button" data-open-import="{dialog_id}">Prepare import</button>
+      <form id="{form_id}" class="review-import-form" method="post" action="/review/promote">
         <input type="hidden" name="id" value="{row['id']}">
-        <div class="muted">{imported_summary}</div>
-        <label>Import as
-          <select name="session_type">
-            {select_option('sprint', raw_type)}
-            {select_option('lap', raw_type)}
-          </select>
-        </label>
-        {missing_required}
-        {hr_note}
-        <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
-        <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
-        {session_feel_form_fields({})}
-        <details>
-          <summary>Imported values</summary>
-          <div class="muted">{escape(import_review_detail_text(row, payload, duration_minutes, rpm, device_watts, entry_index, notes))}</div>
-        </details>
-        <button type="submit">Import entry</button>
+        <button type="submit" data-import-submit disabled>Import entry</button>
+        <dialog id="{dialog_id}" class="review-dialog" data-form-id="{form_id}">
+          <div class="review-dialog-head">
+            <div>
+              <h3>Prepare Import</h3>
+              <div class="muted">{imported_summary}</div>
+            </div>
+            <button class="secondary" type="button" data-close-import>Close</button>
+          </div>
+          <div class="review-dialog-body">
+            <div class="review-dialog-section">
+              <h4>Review choices</h4>
+              <div class="stack">
+                <label>Import as
+                  <select name="session_type">
+                    {select_option('sprint', raw_type)}
+                    {select_option('lap', raw_type)}
+                  </select>
+                </label>
+                <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
+                <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
+                <label>Entry number<input name="entry_index" type="number" min="1" value="{fmt_raw(entry_index)}"></label>
+                {missing_required}
+                <label>Notes<input name="notes" value="{escape(notes)}"></label>
+              </div>
+              {hr_note}
+              {session_feel_form_fields({})}
+            </div>
+            <div class="review-dialog-section">
+              <h4>Imported values</h4>
+              {import_review_detail_panel(row, payload, duration_minutes, rpm, device_watts, entry_index, notes)}
+            </div>
+          </div>
+          <div class="dialog-actions">
+            <button class="secondary" type="button" data-close-import>Cancel</button>
+            <button type="button" data-ready-import>OK</button>
+          </div>
+        </dialog>
       </form>"""
 
 
@@ -2348,7 +2502,7 @@ def review_missing_required_inputs(row: sqlite3.Row, performed_on: str) -> str:
     return "".join(fields)
 
 
-def import_review_detail_text(
+def import_review_detail_panel(
     row: sqlite3.Row,
     payload: dict[str, object],
     duration_minutes: float | None,
@@ -2357,21 +2511,25 @@ def import_review_detail_text(
     entry_index: int | None,
     notes: str,
 ) -> str:
-    pieces = [
-        f"Date: {fmt_date(date_part(row['started_on']))}" if date_part(row["started_on"]) else "Date: not detected",
-        f"Start: {fmt_datetime(row['started_on'])}" if row["started_on"] else "",
-        f"Duration: {fmt_minutes(duration_minutes)}" if duration_minutes is not None else "Duration: not detected",
-        f"HR: {fmt_num(row['hr'], 0)}" if row["hr"] not in (None, "") else "HR: not detected",
-        f"RPM: {rpm}" if rpm else "RPM: not detected",
-        f"Device watts: {device_watts}" if device_watts else "Device watts: not detected",
-        f"Raw distance: {fmt_num(row['raw_distance'], 3)}" if row["raw_distance"] is not None else "",
-        f"Entry number: {entry_index}" if entry_index is not None else "",
-        f"Notes: {notes}" if notes else "",
+    items = [
+        ("Date", fmt_date(date_part(row["started_on"])) if date_part(row["started_on"]) else "Not detected"),
+        ("Start", fmt_datetime(row["started_on"]) if row["started_on"] else "Not detected"),
+        ("Duration", fmt_minutes(duration_minutes) if duration_minutes is not None else "Not detected"),
+        ("HR", fmt_num(row["hr"], 0) if row["hr"] not in (None, "") else "Not detected"),
+        ("RPM", rpm or "Not detected"),
+        ("Device watts", device_watts or "Not detected"),
+        ("Raw distance", fmt_num(row["raw_distance"], 3) if row["raw_distance"] is not None else "Not detected"),
+        ("Entry number", str(entry_index) if entry_index is not None else "Not detected"),
+        ("Notes", notes or "None"),
     ]
     hr_text = hr_quality_text(payload)
     if hr_text:
-        pieces.append(hr_text)
-    return "; ".join(piece for piece in pieces if piece)
+        items.append(("HR quality", hr_text))
+    cells = "".join(
+        f'<div class="readonly-item"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'
+        for label, value in items
+    )
+    return f'<div class="readonly-grid">{cells}</div>'
 
 
 def inferred_entry_index(conn: sqlite3.Connection | None, entry_type: str, performed_on: str | None) -> int | None:

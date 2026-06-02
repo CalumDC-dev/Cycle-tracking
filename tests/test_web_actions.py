@@ -1519,7 +1519,10 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("RPM 132.3", html)
         self.assertIn("device W 347.7", html)
         self.assertIn("time 1:15:02", html)
-        self.assertIn("RPM: 132.3", html)
+        self.assertIn("<span>RPM</span><strong>132.3</strong>", html)
+        self.assertIn("<span>Duration</span><strong>1:15:02</strong>", html)
+        self.assertIn("Prepare import", html)
+        self.assertIn("data-import-submit disabled", html)
         self.assertNotIn('name="rpm"', html)
         self.assertNotIn('name="device_watts"', html)
         self.assertNotIn('name="duration_minutes"', html)
@@ -1556,8 +1559,8 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("HR 122", html)
         self.assertIn("next #2", html)
         self.assertIn("<summary>Session feel</summary>", html)
-        self.assertIn("<summary>Imported values</summary>", html)
-        self.assertNotIn('name="entry_index"', html)
+        self.assertIn("<h4>Imported values</h4>", html)
+        self.assertIn('name="entry_index" type="number" min="1" value="2"', html)
         self.assertNotIn('name="performed_on"', html)
 
     def test_promote_raw_activity_defaults_missing_resistance_to_four(self):
@@ -1604,6 +1607,9 @@ class WebActionTests(unittest.TestCase):
 
         self.assertIn('name="session_type" value="ignore"', html)
         self.assertIn("Ignore activity", html)
+        self.assertIn("Prepare import", html)
+        self.assertIn("data-open-import", html)
+        self.assertIn("data-import-submit disabled", html)
 
     def test_reopen_raw_activity_restores_ignored_activity_to_review(self):
         add_raw_activity(
