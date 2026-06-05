@@ -145,24 +145,28 @@ main {
   aspect-ratio: 620 / 620;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: #dceef8;
 }
 .challenge-map-copy {
   display: grid;
   gap: 4px;
   margin-bottom: 12px;
 }
+.challenge-landmass {
+  fill: #5f9f78;
+  opacity: 0.9;
+}
 .challenge-route-base {
   fill: none;
-  stroke: #c6d2de;
-  stroke-width: 10;
+  stroke: #44795a;
+  stroke-width: 7;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 .challenge-route-progress {
   fill: none;
-  stroke: var(--green);
-  stroke-width: 11;
+  stroke: #f2c84b;
+  stroke-width: 9;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -1102,6 +1106,7 @@ def coastline_challenge_svg(progress_ratio: float, team_miles: float) -> str:
     progress_units = progress_ratio * 1000
     return f"""
 <svg class="challenge-map" viewBox="0 0 620 620" role="img" aria-label="{escape(UK_COASTLINE_CHALLENGE_NAME)} progress map">
+  <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-landmass" />
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-base" pathLength="1000" />
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-progress" pathLength="1000" stroke-dasharray="{progress_units:.2f} 1000" />
   <circle cx="{UK_COASTLINE_START_X}" cy="{UK_COASTLINE_START_Y}" r="8" class="challenge-marker" />
