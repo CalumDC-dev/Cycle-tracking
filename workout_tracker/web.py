@@ -141,10 +141,16 @@ main {
 }
 .challenge-map {
   width: 100%;
-  min-height: 360px;
+  display: block;
+  aspect-ratio: 620 / 620;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfe;
+}
+.challenge-map-copy {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
 }
 .challenge-route-base {
   fill: none;
@@ -1052,6 +1058,10 @@ def coastline_challenge_panel(challenge: dict[str, object], personal_miles: floa
     return f"""
 <div class="challenge-layout">
   <div>
+    <div class="challenge-map-copy">
+      <strong>{escape(UK_COASTLINE_CHALLENGE_NAME)}</strong>
+      <div class="challenge-note">{fmt_num(team_miles, 0)} of {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles complete; {fmt_num(remaining, 0)} remaining</div>
+    </div>
     {coastline_challenge_svg(progress_ratio, team_miles)}
     <div class="challenge-note">Stylised route for progress only; distance target remains {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles.</div>
   </div>
@@ -1090,17 +1100,14 @@ def challenge_update_summary(challenge: dict[str, object]) -> str:
 
 def coastline_challenge_svg(progress_ratio: float, team_miles: float) -> str:
     progress_units = progress_ratio * 1000
-    remaining = max(UK_COASTLINE_TOTAL_MILES - team_miles, 0)
     return f"""
-<svg class="challenge-map" viewBox="0 0 620 560" role="img" aria-label="{escape(UK_COASTLINE_CHALLENGE_NAME)} progress map">
-  <text x="28" y="34" class="challenge-label">{escape(UK_COASTLINE_CHALLENGE_NAME)}</text>
-  <text x="28" y="56" class="challenge-small">{fmt_num(team_miles, 0)} of {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles complete; {fmt_num(remaining, 0)} remaining</text>
+<svg class="challenge-map" viewBox="0 0 620 620" role="img" aria-label="{escape(UK_COASTLINE_CHALLENGE_NAME)} progress map">
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-base" pathLength="1000" />
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-progress" pathLength="1000" stroke-dasharray="{progress_units:.2f} 1000" />
   <circle cx="{UK_COASTLINE_START_X}" cy="{UK_COASTLINE_START_Y}" r="8" class="challenge-marker" />
   <text x="{UK_COASTLINE_START_X + 14}" y="{UK_COASTLINE_START_Y - 6}" class="challenge-small">Start</text>
   <text x="{UK_COASTLINE_START_X + 14}" y="{UK_COASTLINE_START_Y + 10}" class="challenge-small">{escape(UK_COASTLINE_START)}</text>
-  <text x="212" y="532" class="challenge-small">Progress line follows the mainland route from the start point</text>
+  <text x="212" y="586" class="challenge-small">Progress line follows the mainland route from the start point</text>
 </svg>"""
 
 
