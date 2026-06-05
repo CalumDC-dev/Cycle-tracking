@@ -389,6 +389,9 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("5,222", html)
         self.assertIn("11,073", html)
         self.assertIn("North Shields", html)
+        self.assertIn("mainland-only outline", html)
+        self.assertNotIn("Northern Ireland", html)
+        self.assertNotIn("Clockwise", html)
         self.assertIn("Save progress", html)
 
     def test_add_challenge_progress_updates_dashboard_value(self):
