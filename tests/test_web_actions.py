@@ -412,6 +412,30 @@ class WebActionTests(unittest.TestCase):
         self.assertIn("08-06-2026", html)
         self.assertIn("Week two", html)
 
+    def test_dashboard_highlights_latest_challenge_week_segment(self):
+        add_challenge_progress(
+            self.conn,
+            {
+                "updated_on": "2026-06-01",
+                "team_miles": "5222",
+                "notes": "Week one",
+            },
+        )
+        add_challenge_progress(
+            self.conn,
+            {
+                "updated_on": "2026-06-08",
+                "team_miles": "5400",
+                "notes": "Week two",
+            },
+        )
+
+        html = render_dashboard(self.conn)
+
+        self.assertIn('class="challenge-route-week"', html)
+        self.assertIn('Latest weekly addition: 178.0 miles.', html)
+        self.assertIn('stroke-dashoffset="-471.60"', html)
+
     def test_maintenance_flags_possible_manual_duplicate_entries(self):
         add_sprint_entry(
             self.conn,

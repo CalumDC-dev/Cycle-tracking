@@ -170,6 +170,13 @@ main {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.challenge-route-week {
+  fill: none;
+  stroke: #c84232;
+  stroke-width: 11;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .challenge-route-link {
   fill: none;
   stroke: #9aaabd;
@@ -1053,12 +1060,19 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 
 def coastline_challenge_panel(challenge: dict[str, object], personal_miles: float) -> str:
     team_miles = float(challenge["team_miles"])
+    previous_team_miles = challenge.get("previous_team_miles")
+    weekly_miles = None if previous_team_miles is None else max(team_miles - float(previous_team_miles), 0)
     progress_ratio = challenge_progress_ratio(team_miles)
     remaining = max(UK_COASTLINE_TOTAL_MILES - team_miles, 0)
     updated_on = str(challenge.get("updated_on") or "")
     update_value = updated_on or today_iso()
     notes = str(challenge.get("notes") or "")
     saved_note = "" if challenge.get("saved") else "Default value shown until the first weekly update is saved."
+    weekly_note = (
+        "Weekly segment appears after two saved charity totals."
+        if weekly_miles is None
+        else f"Latest weekly addition: {fmt_num(weekly_miles, 1)} miles."
+    )
     return f"""
 <div class="challenge-layout">
   <div>
@@ -1066,7 +1080,7 @@ def coastline_challenge_panel(challenge: dict[str, object], personal_miles: floa
       <strong>{escape(UK_COASTLINE_CHALLENGE_NAME)}</strong>
       <div class="challenge-note">{fmt_num(team_miles, 0)} of {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles complete; {fmt_num(remaining, 0)} remaining</div>
     </div>
-    {coastline_challenge_svg(progress_ratio, team_miles)}
+    {coastline_challenge_svg(progress_ratio, weekly_miles, previous_team_miles)}
     <div class="challenge-note">Stylised route for progress only; distance target remains {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles.</div>
   </div>
   <div class="challenge-panel">
@@ -1079,6 +1093,7 @@ def coastline_challenge_panel(challenge: dict[str, object], personal_miles: floa
     <div>
       <div class="challenge-bar"><span style="width:{progress_ratio * 100:.2f}%"></span></div>
       <div class="challenge-note">{challenge_update_summary(challenge)}</div>
+      <div class="challenge-note">{escape(weekly_note)}</div>
       <div class="challenge-note">{escape(saved_note)}</div>
     </div>
     <form class="stack" method="post" action="/challenge/progress/add">
@@ -1102,13 +1117,26 @@ def challenge_update_summary(challenge: dict[str, object]) -> str:
     return f"Latest update: {escape(updated_on)}"
 
 
-def coastline_challenge_svg(progress_ratio: float, team_miles: float) -> str:
+def coastline_challenge_svg(
+    progress_ratio: float,
+    weekly_miles: float | None = None,
+    previous_team_miles: float | None = None,
+) -> str:
     progress_units = progress_ratio * 1000
+    weekly_units = 0.0 if weekly_miles is None else challenge_progress_ratio(weekly_miles) * 1000
+    previous_units = 0.0 if previous_team_miles is None else challenge_progress_ratio(previous_team_miles) * 1000
+    weekly_segment = ""
+    if weekly_units > 0:
+        weekly_segment = (
+            f'<path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-week" pathLength="1000" '
+            f'stroke-dasharray="{weekly_units:.2f} 1000" stroke-dashoffset="{-previous_units:.2f}" />'
+        )
     return f"""
 <svg class="challenge-map" viewBox="0 0 620 620" role="img" aria-label="{escape(UK_COASTLINE_CHALLENGE_NAME)} progress map">
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-landmass" />
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-base" pathLength="1000" />
   <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-progress" pathLength="1000" stroke-dasharray="{progress_units:.2f} 1000" />
+  {weekly_segment}
   <circle cx="{UK_COASTLINE_START_X}" cy="{UK_COASTLINE_START_Y}" r="8" class="challenge-marker" />
   <text x="{UK_COASTLINE_START_X + 14}" y="{UK_COASTLINE_START_Y - 6}" class="challenge-small">Start</text>
   <text x="{UK_COASTLINE_START_X + 14}" y="{UK_COASTLINE_START_Y + 10}" class="challenge-small">{escape(UK_COASTLINE_START)}</text>
@@ -1117,25 +1145,29 @@ def coastline_challenge_svg(progress_ratio: float, team_miles: float) -> str:
 
 
 def latest_challenge_progress(conn: sqlite3.Connection) -> dict[str, object]:
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT *
         FROM challenge_progress
         WHERE challenge_key = ?
         ORDER BY updated_on DESC, id DESC
-        LIMIT 1
+        LIMIT 2
         """,
         (UK_COASTLINE_CHALLENGE_KEY,),
-    ).fetchone()
-    if row:
+    ).fetchall()
+    if rows:
+        row = rows[0]
+        previous = rows[1] if len(rows) > 1 else None
         return {
             "team_miles": float(row["team_miles"]),
+            "previous_team_miles": float(previous["team_miles"]) if previous else None,
             "updated_on": row["updated_on"],
             "notes": row["notes"],
             "saved": True,
         }
     return {
         "team_miles": UK_COASTLINE_INITIAL_MILES,
+        "previous_team_miles": None,
         "updated_on": "",
         "notes": "",
         "saved": False,
