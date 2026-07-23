@@ -159,21 +159,21 @@ main {
 .challenge-route-base {
   fill: none;
   stroke: #44795a;
-  stroke-width: 7;
+  stroke-width: 3.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 .challenge-route-progress {
   fill: none;
   stroke: #f2c84b;
-  stroke-width: 9;
+  stroke-width: 4.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 .challenge-route-week {
   fill: none;
   stroke: #c84232;
-  stroke-width: 11;
+  stroke-width: 5.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
