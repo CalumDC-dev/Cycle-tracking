@@ -33,6 +33,15 @@ class CalculatedSprint:
     calibrated_distance: float | None
     calories_watts: float | None
     calories_mets: float | None
+    rpe: int | None
+    leg_fatigue: int | None
+    breathing_strain: int | None
+    energy_level: int | None
+    sleep_quality: int | None
+    heat_flag: int
+    hydration_ok: int | None
+    food_ok: int | None
+    hit_wall: int
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,15 @@ class CalculatedLap:
     resistance: int | None
     rpm: float | None
     calories_mets: float | None
+    rpe: int | None
+    leg_fatigue: int | None
+    breathing_strain: int | None
+    energy_level: int | None
+    sleep_quality: int | None
+    heat_flag: int
+    hydration_ok: int | None
+    food_ok: int | None
+    hit_wall: int
 
 
 def active_calibration(conn: sqlite3.Connection) -> sqlite3.Row:
@@ -257,6 +275,15 @@ def calculated_sprints(conn: sqlite3.Connection) -> list[CalculatedSprint]:
                 calibrated_distance=calibrated_distance,
                 calories_watts=calories_watts,
                 calories_mets=_met_calories(conn, row["performed_on"], row["hr"], row["duration_minutes"]),
+                rpe=row["rpe"],
+                leg_fatigue=row["leg_fatigue"],
+                breathing_strain=row["breathing_strain"],
+                energy_level=row["energy_level"],
+                sleep_quality=row["sleep_quality"],
+                heat_flag=int(row["heat_flag"] or 0),
+                hydration_ok=row["hydration_ok"],
+                food_ok=row["food_ok"],
+                hit_wall=int(row["hit_wall"] or 0),
             )
         )
     return output
@@ -295,6 +322,15 @@ def calculated_laps(conn: sqlite3.Connection) -> list[CalculatedLap]:
                 resistance=row["resistance"],
                 rpm=row["rpm"],
                 calories_mets=_met_calories(conn, row["performed_on"], row["hr"], row["lap_time_minutes"]),
+                rpe=row["rpe"],
+                leg_fatigue=row["leg_fatigue"],
+                breathing_strain=row["breathing_strain"],
+                energy_level=row["energy_level"],
+                sleep_quality=row["sleep_quality"],
+                heat_flag=int(row["heat_flag"] or 0),
+                hydration_ok=row["hydration_ok"],
+                food_ok=row["food_ok"],
+                hit_wall=int(row["hit_wall"] or 0),
             )
         )
     return output

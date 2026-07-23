@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS mass_log (
     mass_kg REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS challenge_progress (
+    id INTEGER PRIMARY KEY,
+    challenge_key TEXT NOT NULL,
+    updated_on TEXT NOT NULL,
+    team_miles REAL NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS circuits (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -110,7 +119,16 @@ CREATE TABLE IF NOT EXISTS sprint_entries (
     resistance INTEGER,
     device_distance REAL,
     raw_activity_id INTEGER REFERENCES raw_activities(id),
-    notes TEXT
+    notes TEXT,
+    rpe INTEGER,
+    leg_fatigue INTEGER,
+    breathing_strain INTEGER,
+    energy_level INTEGER,
+    sleep_quality INTEGER,
+    heat_flag INTEGER NOT NULL DEFAULT 0,
+    hydration_ok INTEGER,
+    food_ok INTEGER,
+    hit_wall INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS lap_entries (
@@ -124,7 +142,16 @@ CREATE TABLE IF NOT EXISTS lap_entries (
     resistance INTEGER,
     rpm REAL,
     raw_activity_id INTEGER REFERENCES raw_activities(id),
-    notes TEXT
+    notes TEXT,
+    rpe INTEGER,
+    leg_fatigue INTEGER,
+    breathing_strain INTEGER,
+    energy_level INTEGER,
+    sleep_quality INTEGER,
+    heat_flag INTEGER NOT NULL DEFAULT 0,
+    hydration_ok INTEGER,
+    food_ok INTEGER,
+    hit_wall INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS duplicate_dismissals (
@@ -148,6 +175,7 @@ CREATE TABLE IF NOT EXISTS import_log (
 CREATE INDEX IF NOT EXISTS idx_sprint_entries_performed_on ON sprint_entries(performed_on);
 CREATE INDEX IF NOT EXISTS idx_lap_entries_performed_on ON lap_entries(performed_on);
 CREATE INDEX IF NOT EXISTS idx_raw_activities_review_status ON raw_activities(review_status);
+CREATE INDEX IF NOT EXISTS idx_challenge_progress_key_date ON challenge_progress(challenge_key, updated_on);
 """
 
 
@@ -174,6 +202,7 @@ def reset_db(conn: sqlite3.Connection) -> None:
         "sprint_entries",
         "raw_activities",
         "circuits",
+        "challenge_progress",
         "mass_log",
         "met_lookup",
         "resistance_calibration_tests",
@@ -193,6 +222,16 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "calibration_profiles", "flywheel_diameter_mm", "REAL NOT NULL DEFAULT 150.0")
     _ensure_column(conn, "sprint_entries", "started_at", "TEXT")
     _ensure_column(conn, "lap_entries", "started_at", "TEXT")
+    for table in ("sprint_entries", "lap_entries"):
+        _ensure_column(conn, table, "rpe", "INTEGER")
+        _ensure_column(conn, table, "leg_fatigue", "INTEGER")
+        _ensure_column(conn, table, "breathing_strain", "INTEGER")
+        _ensure_column(conn, table, "energy_level", "INTEGER")
+        _ensure_column(conn, table, "sleep_quality", "INTEGER")
+        _ensure_column(conn, table, "heat_flag", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, table, "hydration_ok", "INTEGER")
+        _ensure_column(conn, table, "food_ok", "INTEGER")
+        _ensure_column(conn, table, "hit_wall", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "raw_activities", "hr", "INTEGER")
     _ensure_column(conn, "raw_activities", "duplicate_entry_type", "TEXT")
     _ensure_column(conn, "raw_activities", "duplicate_entry_id", "INTEGER")

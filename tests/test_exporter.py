@@ -84,6 +84,12 @@ class ExporterTests(unittest.TestCase):
             VALUES ('2026-05-12', 1, 5)
             """
         )
+        conn.execute(
+            """
+            INSERT INTO challenge_progress (challenge_key, updated_on, team_miles)
+            VALUES ('uk_coastline', '2026-06-08', 5300)
+            """
+        )
         conn.commit()
 
         bundle = backup_bundle_bytes(conn)
@@ -97,6 +103,7 @@ class ExporterTests(unittest.TestCase):
                 sqlite_path = Path(temp_dir) / "workout_tracker.sqlite"
                 sqlite_path.write_bytes(archive.read("workout_tracker.sqlite"))
                 sprint_csv = archive.read("data/sprint_entries.csv").decode("utf-8")
+                challenge_csv = archive.read("data/challenge_progress.csv").decode("utf-8")
 
             snapshot = sqlite3.connect(sqlite_path)
             try:
@@ -108,7 +115,9 @@ class ExporterTests(unittest.TestCase):
         self.assertEqual(manifest["format"], "workout-tracker-backup")
         self.assertIn("reports/daily_summary.csv", names)
         self.assertIn("data/resistance_scaling.csv", names)
+        self.assertIn("data/challenge_progress.csv", names)
         self.assertIn("2026-05-12", sprint_csv)
+        self.assertIn("uk_coastline", challenge_csv)
         self.assertEqual(sprint_count, 1)
 
 

@@ -25,6 +25,7 @@ from .activity_metrics import (
     source_metric_rows,
 )
 from .calculations import (
+    KM_TO_MILES,
     calculated_laps,
     calculated_sprints,
     dashboard_metrics,
@@ -131,6 +132,91 @@ main {
   margin-top: 8px;
   font-size: 24px;
   line-height: 1.15;
+}
+.challenge-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.35fr) minmax(260px, .65fr);
+  gap: 16px;
+  align-items: start;
+}
+.challenge-map {
+  width: 100%;
+  display: block;
+  aspect-ratio: 620 / 620;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #dceef8;
+}
+.challenge-map-copy {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.challenge-landmass {
+  fill: #5f9f78;
+  opacity: 0.9;
+}
+.challenge-route-base {
+  fill: none;
+  stroke: #44795a;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.challenge-route-progress {
+  fill: none;
+  stroke: #f2c84b;
+  stroke-width: 4.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.challenge-route-week {
+  fill: none;
+  stroke: #c84232;
+  stroke-width: 5.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.challenge-route-link {
+  fill: none;
+  stroke: #9aaabd;
+  stroke-width: 4;
+  stroke-dasharray: 8 8;
+  stroke-linecap: round;
+}
+.challenge-marker {
+  fill: var(--blue);
+  stroke: #fff;
+  stroke-width: 3;
+}
+.challenge-label {
+  fill: var(--ink);
+  font-size: 16px;
+  font-weight: 700;
+}
+.challenge-small {
+  fill: var(--muted);
+  font-size: 13px;
+}
+.challenge-bar {
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: #edf2f7;
+}
+.challenge-bar span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+.challenge-panel {
+  display: grid;
+  gap: 12px;
+}
+.challenge-note {
+  color: var(--muted);
+  font-size: 13px;
 }
 .progress-cards {
   display: grid;
@@ -313,6 +399,12 @@ button {
   background: var(--blue);
   cursor: pointer;
 }
+button[disabled] {
+  border-color: #b8c4d0;
+  color: #6f7d8c;
+  background: #edf2f7;
+  cursor: not-allowed;
+}
 button.secondary {
   border-color: #8091a5;
   color: var(--ink);
@@ -332,6 +424,93 @@ button.secondary {
   border-radius: 6px;
 }
 .muted { color: var(--muted); }
+.review-actions {
+  display: grid;
+  gap: 8px;
+  min-width: 170px;
+}
+.review-actions form,
+.review-actions button {
+  width: 100%;
+}
+.review-import-form {
+  display: grid;
+  gap: 8px;
+}
+.review-dialog {
+  width: min(920px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 22px 60px rgba(20, 32, 44, .22);
+}
+.review-dialog::backdrop {
+  background: rgba(18, 32, 44, .36);
+}
+.review-dialog-head {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: start;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #f8fbfd;
+}
+.review-dialog-head h3 {
+  margin: 0;
+  font-size: 18px;
+}
+.review-dialog-body {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+  max-height: calc(min(760px, 100vh - 32px) - 122px);
+}
+.review-dialog-section {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.review-dialog-section h4 {
+  margin: 0;
+  font-size: 15px;
+}
+.review-dialog .stack {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.readonly-grid {
+  display: grid;
+  gap: 8px;
+}
+.readonly-item {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 9px;
+  background: #fbfcfe;
+}
+.readonly-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.readonly-item strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--line);
+}
 .table-scroll {
   overflow-x: auto;
 }
@@ -378,15 +557,167 @@ button.secondary {
 @media (max-width: 720px) {
   main { padding: 14px; }
   form.inline { grid-template-columns: 1fr; }
+  .challenge-layout { grid-template-columns: 1fr; }
+  .review-dialog-body { grid-template-columns: 1fr; }
   svg.chart-large { min-height: 360px; }
   table { font-size: 13px; }
 }
+"""
+
+REVIEW_DIALOG_SCRIPT = r"""
+document.addEventListener("click", function (event) {
+  const openButton = event.target.closest("[data-open-import]");
+  if (openButton) {
+    const dialog = document.getElementById(openButton.dataset.openImport);
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "open");
+    }
+    return;
+  }
+
+  const closeButton = event.target.closest("[data-close-import]");
+  if (closeButton) {
+    const dialog = closeButton.closest("dialog");
+    if (!dialog) return;
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+    return;
+  }
+
+  const readyButton = event.target.closest("[data-ready-import]");
+  if (readyButton) {
+    const dialog = readyButton.closest("dialog");
+    const form = dialog ? document.getElementById(dialog.dataset.formId) : null;
+    if (!dialog || !form) return;
+    if (!form.reportValidity()) return;
+    const submitButton = form.querySelector("[data-import-submit]");
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = "Import entry";
+      submitButton.focus();
+    }
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+  }
+});
 """
 
 STRONG_DUPLICATE_THRESHOLD = 0.85
 POSSIBLE_DUPLICATE_THRESHOLD = 0.6
 MIN_RESISTANCE = 1
 MAX_RESISTANCE = 16
+UK_COASTLINE_CHALLENGE_KEY = "uk_coastline"
+UK_COASTLINE_CHALLENGE_NAME = "UK Coastline Challenge"
+UK_COASTLINE_TOTAL_MILES = 11073.0
+UK_COASTLINE_INITIAL_MILES = 5222.0
+UK_COASTLINE_START = "North Shields"
+UK_COASTLINE_START_X = 353.7
+UK_COASTLINE_START_Y = 242.4
+UK_MAINLAND_ROUTE_PATH = (
+    "M 353.7 242.4 L 356.7 241.0 L 347.4 234.4 L 352.0 235.2 L 348.5 223.7 L 344.1 222.2 "
+    "L 347.3 222.7 L 344.6 210.8 L 317.5 199.1 L 324.1 198.9 L 315.5 190.4 L 285.2 182.3 "
+    "L 264.2 188.9 L 228.3 185.8 L 216.3 178.9 L 245.3 185.4 L 266.4 174.9 L 289.4 171.0 "
+    "L 271.3 166.6 L 277.9 160.9 L 248.2 166.8 L 241.7 162.1 L 250.9 165.7 L 293.1 154.0 "
+    "L 298.8 146.5 L 292.0 145.6 L 297.7 146.3 L 310.2 137.4 L 320.5 122.5 L 316.4 122.9 "
+    "L 323.8 112.6 L 320.3 109.3 L 324.0 112.3 L 335.7 103.5 L 333.1 95.4 L 323.1 90.6 "
+    "L 293.6 93.2 L 251.0 89.1 L 184.6 103.5 L 206.0 97.5 L 211.5 91.7 L 198.0 92.2 "
+    "L 186.2 98.1 L 195.2 91.5 L 212.5 90.8 L 223.9 81.1 L 209.1 84.2 L 177.2 75.1 "
+    "L 194.8 81.4 L 210.5 81.5 L 206.6 76.4 L 261.1 52.9 L 260.3 48.5 L 264.5 46.9 "
+    "L 258.7 44.9 L 265.8 37.6 L 246.1 36.0 L 246.4 40.4 L 230.2 38.9 L 216.7 43.5 "
+    "L 210.1 39.9 L 197.6 43.5 L 199.3 45.9 L 191.5 43.5 L 184.5 49.0 L 186.7 42.5 "
+    "L 178.1 41.3 L 169.0 48.7 L 174.5 42.8 L 166.8 40.0 L 165.6 45.0 L 164.9 40.2 "
+    "L 154.7 38.6 L 148.1 46.3 L 155.8 49.8 L 150.8 48.4 L 148.7 50.5 L 154.0 52.6 "
+    "L 147.2 50.6 L 144.9 54.0 L 158.7 61.7 L 134.0 58.9 L 141.7 65.4 L 138.3 70.1 "
+    "L 129.5 69.3 L 145.4 76.1 L 142.6 77.9 L 151.3 84.0 L 134.9 77.1 L 143.2 82.3 "
+    "L 120.5 77.9 L 121.3 86.8 L 116.8 81.2 L 109.5 81.6 L 109.6 87.7 L 117.5 90.4 "
+    "L 109.2 93.9 L 126.5 99.6 L 108.3 97.3 L 109.1 109.3 L 130.3 106.0 L 114.0 113.8 "
+    "L 132.3 112.3 L 126.2 114.0 L 131.2 117.7 L 125.4 114.5 L 116.3 120.2 L 133.5 123.7 "
+    "L 114.7 123.1 L 110.8 126.7 L 126.6 130.0 L 109.1 129.0 L 107.8 134.9 L 103.3 135.8 "
+    "L 117.8 136.7 L 106.5 140.2 L 113.3 141.8 L 86.3 145.6 L 125.2 147.1 L 98.7 149.6 "
+    "L 116.7 157.9 L 148.2 139.4 L 136.3 137.6 L 150.3 139.0 L 141.3 146.3 L 156.8 145.7 "
+    "L 137.3 149.1 L 131.8 155.5 L 142.1 154.1 L 128.6 158.8 L 142.2 160.7 L 151.6 154.4 "
+    "L 144.4 160.6 L 129.3 160.6 L 125.0 165.6 L 130.3 165.4 L 122.7 167.0 L 121.7 171.8 "
+    "L 128.1 171.3 L 120.7 178.4 L 126.6 175.0 L 123.2 179.5 L 126.6 181.3 L 122.4 180.6 "
+    "L 115.1 188.6 L 123.4 183.4 L 116.5 190.7 L 123.2 189.2 L 117.9 194.7 L 120.6 199.1 "
+    "L 130.7 193.7 L 117.2 203.5 L 110.4 225.0 L 125.9 221.6 L 121.3 217.9 L 129.4 209.5 "
+    "L 129.8 202.1 L 137.5 197.9 L 131.9 193.4 L 130.4 183.6 L 135.8 184.5 L 152.9 171.1 "
+    "L 159.8 170.5 L 135.7 187.5 L 137.6 194.0 L 143.7 195.4 L 144.3 186.5 L 150.9 191.4 "
+    "L 148.2 185.2 L 156.3 193.5 L 162.2 180.9 L 159.7 176.5 L 162.8 180.1 L 169.3 174.1 "
+    "L 161.8 182.5 L 163.4 186.3 L 168.2 186.3 L 164.6 181.3 L 171.8 187.6 L 200.2 194.8 "
+    "L 161.9 189.0 L 160.4 202.6 L 173.3 206.9 L 176.3 216.0 L 168.9 218.4 L 155.3 234.0 "
+    "L 151.7 240.2 L 155.5 246.5 L 146.1 241.4 L 147.0 249.7 L 163.4 262.1 L 157.3 252.7 "
+    "L 161.5 249.2 L 189.8 259.6 L 192.0 253.0 L 184.2 249.5 L 188.9 247.7 L 184.6 244.5 "
+    "L 194.3 250.6 L 200.7 248.1 L 198.8 251.6 L 205.8 254.9 L 208.3 249.2 L 208.6 254.7 "
+    "L 220.4 252.0 L 221.2 247.2 L 233.8 248.9 L 232.7 238.0 L 237.9 243.7 L 266.7 243.2 "
+    "L 244.8 249.1 L 231.3 269.0 L 242.8 278.6 L 247.4 277.3 L 243.6 281.9 L 249.1 287.1 "
+    "L 254.7 282.1 L 253.5 291.3 L 258.7 294.2 L 266.7 282.7 L 265.0 286.8 L 269.0 289.6 "
+    "L 278.7 283.7 L 274.5 287.8 L 279.2 290.3 L 271.4 296.0 L 273.9 298.4 L 278.9 294.3 "
+    "L 276.4 300.4 L 267.2 301.8 L 270.0 306.0 L 277.0 305.5 L 264.7 302.1 L 264.1 311.1 "
+    "L 286.1 311.8 L 275.3 312.6 L 278.3 318.8 L 276.3 313.3 L 270.6 313.2 L 261.3 323.2 "
+    "L 274.0 335.1 L 290.9 332.3 L 275.2 337.8 L 264.9 329.0 L 256.0 332.1 L 261.9 340.1 "
+    "L 273.2 343.6 L 249.1 333.8 L 238.6 336.3 L 241.6 338.3 L 218.0 334.8 L 222.5 338.5 "
+    "L 221.6 345.3 L 219.8 337.2 L 200.0 342.1 L 191.3 352.0 L 168.1 365.3 L 181.6 366.3 "
+    "L 188.3 359.9 L 211.8 356.8 L 202.9 359.6 L 202.7 364.6 L 207.9 369.6 L 216.7 367.5 "
+    "L 204.0 375.6 L 207.6 379.5 L 217.2 377.5 L 208.0 380.0 L 207.4 387.3 L 199.5 395.1 "
+    "L 172.6 402.7 L 175.5 406.5 L 170.2 403.3 L 165.5 408.8 L 150.9 408.1 L 150.3 411.6 "
+    "L 137.7 415.2 L 149.1 419.7 L 140.9 424.8 L 159.6 426.4 L 157.0 421.0 L 165.8 421.2 "
+    "L 161.1 423.6 L 164.3 427.0 L 148.1 427.7 L 159.2 432.5 L 174.1 424.9 L 187.7 424.2 "
+    "L 181.9 420.5 L 188.5 423.5 L 197.0 417.6 L 190.5 426.0 L 202.9 429.2 L 208.0 425.9 "
+    "L 208.4 429.2 L 197.4 429.6 L 193.9 434.4 L 212.2 434.3 L 223.0 428.2 L 219.5 431.5 "
+    "L 226.8 439.0 L 248.1 444.5 L 257.7 443.1 L 254.5 438.9 L 258.4 440.6 L 273.4 429.6 "
+    "L 267.7 431.8 L 268.3 435.4 L 283.3 433.3 L 285.7 424.3 L 286.6 431.8 L 300.4 422.7 "
+    "L 298.5 420.4 L 308.7 417.6 L 298.9 420.5 L 301.8 423.4 L 283.0 437.4 L 292.0 440.9 "
+    "L 279.9 438.2 L 265.2 447.5 L 268.1 453.5 L 264.0 455.9 L 273.9 463.3 L 268.5 463.8 "
+    "L 271.8 462.1 L 263.7 456.2 L 266.0 453.6 L 199.9 454.7 L 196.5 457.9 L 199.0 461.5 "
+    "L 208.4 463.5 L 201.7 461.8 L 200.9 467.3 L 199.0 462.3 L 192.1 466.5 L 181.7 464.7 "
+    "L 179.6 478.1 L 166.6 488.4 L 158.7 489.1 L 166.2 494.3 L 153.1 491.1 L 152.7 497.0 "
+    "L 148.1 498.8 L 151.2 499.6 L 130.9 512.7 L 127.2 509.6 L 117.4 512.6 L 116.8 519.8 "
+    "L 128.0 514.8 L 144.7 524.0 L 151.9 519.0 L 143.3 516.7 L 152.8 513.9 L 148.5 510.5 "
+    "L 153.5 510.2 L 152.3 507.1 L 157.8 508.5 L 153.2 510.5 L 154.6 514.1 L 166.4 509.6 "
+    "L 168.7 503.4 L 175.6 503.2 L 173.8 499.0 L 175.5 503.7 L 184.6 503.3 L 185.0 500.0 "
+    "L 200.6 504.1 L 199.8 500.2 L 192.9 500.1 L 199.3 499.6 L 198.8 494.0 L 202.7 495.9 "
+    "L 200.8 501.4 L 206.5 499.9 L 204.5 504.0 L 215.3 502.4 L 214.3 505.4 L 220.9 504.5 "
+    "L 217.8 506.4 L 221.1 509.8 L 224.7 506.0 L 224.0 509.5 L 231.2 509.5 L 235.6 503.1 "
+    "L 228.5 497.3 L 238.2 502.5 L 240.2 499.5 L 235.9 497.5 L 240.3 496.0 L 239.4 491.8 "
+    "L 232.8 491.6 L 243.4 487.7 L 238.9 482.6 L 246.9 487.9 L 264.2 481.3 L 278.8 481.7 "
+    "L 297.6 493.2 L 299.6 490.0 L 289.0 485.3 L 296.9 489.3 L 299.7 486.3 L 325.5 488.8 "
+    "L 326.0 483.8 L 316.6 483.9 L 323.4 480.6 L 326.1 483.7 L 337.8 481.4 L 334.1 480.4 "
+    "L 348.4 482.4 L 357.2 478.5 L 354.0 476.0 L 362.0 476.2 L 352.3 469.6 L 357.2 472.5 "
+    "L 358.3 469.5 L 361.7 474.4 L 364.3 470.6 L 362.1 474.8 L 371.3 478.6 L 369.6 473.9 "
+    "L 389.8 475.2 L 383.9 478.2 L 391.2 481.4 L 404.9 477.1 L 406.0 466.9 L 404.9 477.0 "
+    "L 421.4 475.7 L 419.9 468.4 L 419.6 475.3 L 438.6 478.5 L 437.4 470.6 L 438.5 478.1 "
+    "L 444.5 476.2 L 443.6 479.4 L 448.9 480.8 L 472.6 473.1 L 477.3 467.6 L 490.1 470.8 "
+    "L 491.7 464.1 L 513.5 457.0 L 511.9 448.3 L 497.9 449.3 L 515.0 447.8 L 515.1 443.8 "
+    "L 485.1 448.1 L 476.4 446.5 L 476.1 442.2 L 465.4 442.9 L 460.5 445.4 L 463.4 449.3 "
+    "L 460.5 445.4 L 475.6 440.1 L 447.3 440.5 L 442.5 437.1 L 416.7 441.3 L 439.3 437.9 "
+    "L 439.0 434.7 L 455.4 440.6 L 465.6 437.2 L 463.5 434.6 L 482.8 435.0 L 475.3 433.8 "
+    "L 483.8 431.4 L 466.2 431.3 L 487.7 430.4 L 487.4 424.0 L 478.9 427.5 L 472.4 424.3 "
+    "L 490.8 420.7 L 486.5 416.0 L 495.1 419.9 L 493.8 422.8 L 506.5 418.5 L 501.3 417.1 "
+    "L 507.7 412.7 L 494.3 412.5 L 506.9 412.2 L 498.8 406.6 L 509.2 413.7 L 513.3 410.5 "
+    "L 507.8 405.6 L 511.2 403.6 L 513.4 410.6 L 524.7 401.9 L 519.0 400.6 L 524.9 401.8 "
+    "L 517.2 407.6 L 523.8 405.0 L 529.0 392.3 L 522.6 391.2 L 529.2 392.3 L 533.7 383.4 "
+    "L 519.4 383.9 L 529.5 382.1 L 507.5 374.4 L 524.5 378.6 L 531.9 374.7 L 514.6 371.0 "
+    "L 526.8 369.2 L 522.6 373.4 L 533.0 377.7 L 533.1 374.8 L 529.7 368.7 L 507.9 357.5 "
+    "L 465.2 355.3 L 455.3 364.3 L 455.4 376.1 L 435.8 391.1 L 455.7 375.5 L 457.0 367.3 "
+    "L 448.1 363.7 L 442.6 373.9 L 428.3 377.6 L 442.6 373.9 L 447.3 363.8 L 439.1 358.4 "
+    "L 427.7 365.1 L 439.7 357.6 L 433.6 354.9 L 439.7 357.6 L 454.8 347.7 L 448.1 331.1 "
+    "L 419.1 313.9 L 399.5 314.0 L 389.3 329.1 L 393.3 335.8 L 391.3 344.0 L 393.2 335.7 "
+    "L 389.3 329.2 L 396.1 314.7 L 379.8 316.1 L 374.4 320.5 L 387.9 313.5 L 373.4 313.8 "
+    "L 384.7 313.5 L 367.7 305.9 L 373.8 303.8 L 372.1 307.1 L 387.5 315.4 L 410.2 313.8 "
+    "L 416.9 312.1 L 410.8 303.1 L 415.3 301.5 L 412.4 304.4 L 416.7 312.5 L 441.2 318.4 "
+    "L 441.4 321.8 L 442.0 316.9 L 423.3 297.4 L 431.0 291.3 L 391.8 266.5 L 371.5 261.5 "
+    "L 356.4 270.7 L 370.3 263.6 L 365.0 262.7 L 370.2 262.2 L 369.4 258.8 L 362.4 254.7 "
+    "L 359.5 246.3 L 348.8 249.3 L 359.3 243.7 L 335.3 242.7 L 353.7 242.4 Z"
+)
 
 
 @dataclass(frozen=True)
@@ -469,6 +800,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/classify":
                 classify_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/review/reopen":
+                reopen_raw_activity(conn, params)
+                self._redirect("/review")
             elif parsed.path == "/review/confirm-duplicate":
                 confirm_duplicate_activity(conn, params)
                 self._redirect("/review")
@@ -478,6 +812,9 @@ class WorkoutRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/review/promote":
                 promote_raw_activity(conn, params)
                 self._redirect("/review")
+            elif parsed.path == "/challenge/progress/add":
+                add_challenge_progress(conn, params)
+                self._redirect("/")
             elif parsed.path == "/entries/sprint/add":
                 add_sprint_entry(conn, params)
                 self._redirect("/entries")
@@ -620,6 +957,9 @@ def page(title: str, body: str, active: str) -> str:
     <nav>{links}</nav>
   </header>
   <main>{body}</main>
+  <script>
+{REVIEW_DIALOG_SCRIPT}
+  </script>
 </body>
 </html>"""
 
@@ -630,6 +970,8 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
     weekly_distance = metrics["weekly_distance"]
     latest_week = weekly_distance[0] if weekly_distance else None
     source_rows = source_metric_rows(conn)
+    challenge = latest_challenge_progress(conn)
+    personal_miles = km_to_miles(metrics["total_distance"] or 0)
     calories = [(row["date"], row["total_calories"]) for row in daily]
     watts = [(row["date"], row["average_watts"] or 0) for row in daily]
     mass = [(row["measured_on"], row["mass_kg"]) for row in metrics["mass"]]
@@ -667,6 +1009,10 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 <section class="band">
   <h2>Weekly Distance</h2>
   {weekly_distance_table(weekly_distance)}
+</section>
+<section class="band">
+  <h2>Coastline Challenge</h2>
+  {coastline_challenge_panel(challenge, personal_miles)}
 </section>
 <section class="band">
   <h2>Trends</h2>
@@ -712,6 +1058,128 @@ def render_dashboard(conn: sqlite3.Connection) -> str:
 """
 
 
+def coastline_challenge_panel(challenge: dict[str, object], personal_miles: float) -> str:
+    team_miles = float(challenge["team_miles"])
+    previous_team_miles = challenge.get("previous_team_miles")
+    weekly_miles = None if previous_team_miles is None else max(team_miles - float(previous_team_miles), 0)
+    progress_ratio = challenge_progress_ratio(team_miles)
+    remaining = max(UK_COASTLINE_TOTAL_MILES - team_miles, 0)
+    updated_on = str(challenge.get("updated_on") or "")
+    update_value = updated_on or today_iso()
+    notes = str(challenge.get("notes") or "")
+    saved_note = "" if challenge.get("saved") else "Default value shown until the first weekly update is saved."
+    weekly_note = (
+        "Weekly segment appears after two saved charity totals."
+        if weekly_miles is None
+        else f"Latest weekly addition: {fmt_num(weekly_miles, 1)} miles."
+    )
+    return f"""
+<div class="challenge-layout">
+  <div>
+    <div class="challenge-map-copy">
+      <strong>{escape(UK_COASTLINE_CHALLENGE_NAME)}</strong>
+      <div class="challenge-note">{fmt_num(team_miles, 0)} of {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles complete; {fmt_num(remaining, 0)} remaining</div>
+    </div>
+    {coastline_challenge_svg(progress_ratio, weekly_miles, previous_team_miles)}
+    <div class="challenge-note">Stylised route for progress only; distance target remains {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)} miles.</div>
+  </div>
+  <div class="challenge-panel">
+    <div class="metrics">
+      {metric("Team miles", fmt_num(team_miles, 0), "green")}
+      {metric("Complete", fmt_percent(progress_ratio), "green")}
+      {metric("Remaining", fmt_num(remaining, 0), "amber")}
+      {metric("Your logged miles", fmt_num(personal_miles, 1), "blue")}
+    </div>
+    <div>
+      <div class="challenge-bar"><span style="width:{progress_ratio * 100:.2f}%"></span></div>
+      <div class="challenge-note">{challenge_update_summary(challenge)}</div>
+      <div class="challenge-note">{escape(weekly_note)}</div>
+      <div class="challenge-note">{escape(saved_note)}</div>
+    </div>
+    <form class="stack" method="post" action="/challenge/progress/add">
+      <label>Updated on<input name="updated_on" type="date" value="{escape(update_value)}" required></label>
+      <label>Team miles<input name="team_miles" type="number" step="0.1" min="0" max="{fmt_raw(UK_COASTLINE_TOTAL_MILES)}" value="{fmt_raw(team_miles)}" required></label>
+      <label>Notes<input name="notes" value="{escape(notes)}" placeholder="Weekly charity update"></label>
+      <button type="submit">Save progress</button>
+    </form>
+    <div class="challenge-note">Route: mainland-only outline based on the supplied GeoJSON, starting at {escape(UK_COASTLINE_START)}.</div>
+  </div>
+</div>"""
+
+
+def challenge_update_summary(challenge: dict[str, object]) -> str:
+    if not challenge.get("saved"):
+        return "Latest update: default starting value."
+    updated_on = fmt_date(challenge.get("updated_on"))
+    notes = str(challenge.get("notes") or "")
+    if notes:
+        return f"Latest update: {escape(updated_on)}; {escape(notes)}"
+    return f"Latest update: {escape(updated_on)}"
+
+
+def coastline_challenge_svg(
+    progress_ratio: float,
+    weekly_miles: float | None = None,
+    previous_team_miles: float | None = None,
+) -> str:
+    progress_units = progress_ratio * 1000
+    weekly_units = 0.0 if weekly_miles is None else challenge_progress_ratio(weekly_miles) * 1000
+    previous_units = 0.0 if previous_team_miles is None else challenge_progress_ratio(previous_team_miles) * 1000
+    weekly_segment = ""
+    if weekly_units > 0:
+        weekly_segment = (
+            f'<path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-week" pathLength="1000" '
+            f'stroke-dasharray="{weekly_units:.2f} 1000" stroke-dashoffset="{-previous_units:.2f}" />'
+        )
+    return f"""
+<svg class="challenge-map" viewBox="0 0 620 620" role="img" aria-label="{escape(UK_COASTLINE_CHALLENGE_NAME)} progress map">
+  <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-landmass" />
+  <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-base" pathLength="1000" />
+  <path d="{UK_MAINLAND_ROUTE_PATH}" class="challenge-route-progress" pathLength="1000" stroke-dasharray="{progress_units:.2f} 1000" />
+  {weekly_segment}
+  <circle cx="{UK_COASTLINE_START_X}" cy="{UK_COASTLINE_START_Y}" r="8" class="challenge-marker" />
+  <text x="{UK_COASTLINE_START_X + 14}" y="{UK_COASTLINE_START_Y - 6}" class="challenge-small">Start</text>
+  <text x="{UK_COASTLINE_START_X + 14}" y="{UK_COASTLINE_START_Y + 10}" class="challenge-small">{escape(UK_COASTLINE_START)}</text>
+  <text x="212" y="586" class="challenge-small">Progress line follows the mainland route from the start point</text>
+</svg>"""
+
+
+def latest_challenge_progress(conn: sqlite3.Connection) -> dict[str, object]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM challenge_progress
+        WHERE challenge_key = ?
+        ORDER BY updated_on DESC, id DESC
+        LIMIT 2
+        """,
+        (UK_COASTLINE_CHALLENGE_KEY,),
+    ).fetchall()
+    if rows:
+        row = rows[0]
+        previous = rows[1] if len(rows) > 1 else None
+        return {
+            "team_miles": float(row["team_miles"]),
+            "previous_team_miles": float(previous["team_miles"]) if previous else None,
+            "updated_on": row["updated_on"],
+            "notes": row["notes"],
+            "saved": True,
+        }
+    return {
+        "team_miles": UK_COASTLINE_INITIAL_MILES,
+        "previous_team_miles": None,
+        "updated_on": "",
+        "notes": "",
+        "saved": False,
+    }
+
+
+def challenge_progress_ratio(team_miles: float) -> float:
+    if UK_COASTLINE_TOTAL_MILES <= 0:
+        return 0.0
+    return max(0.0, min(float(team_miles) / UK_COASTLINE_TOTAL_MILES, 1.0))
+
+
 def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = None) -> str:
     filters = normalize_entry_filters(filters or {})
     all_sprints = latest_first(calculated_sprints(conn))
@@ -737,6 +1205,7 @@ def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = No
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>Device distance<input name="device_distance" type="number" step="0.001" min="0"></label>
     <label>Notes<input name="notes"></label>
+    {session_feel_form_fields({})}
     <button type="submit">Add sprint</button>
   </form>
 </section>
@@ -753,6 +1222,7 @@ def render_entries(conn: sqlite3.Connection, filters: dict[str, str] | None = No
     <label>Resistance<select name="resistance">{resistance_select_options(4)}</select></label>
     <label>RPM<input name="rpm" type="number" step="0.1" min="0"></label>
     <label>Notes<input name="notes"></label>
+    {session_feel_form_fields({})}
     <button type="submit">Add lap</button>
   </form>
   {circuit_goal_script()}
@@ -956,6 +1426,98 @@ def entry_filter_summary(
     return f"{displayed_total} of {filtered_total} matching entries. Select Show all to reveal older matches."
 
 
+def session_feel_form_fields(values: dict[str, object], *, form_id: str | None = None, wrap: bool = True) -> str:
+    form_attr = f' form="{escape(form_id)}"' if form_id else ""
+    controls = f"""
+    <label>RPE{session_rating_select("rpe", values.get("rpe"), rating_labels(10), form_attr)}</label>
+    <label>Leg fatigue{session_rating_select("leg_fatigue", values.get("leg_fatigue"), {
+        1: "Fresh", 2: "Fine", 3: "Heavy", 4: "Very heavy", 5: "Failed / cliff"
+    }, form_attr)}</label>
+    <label>Breathing{session_rating_select("breathing_strain", values.get("breathing_strain"), {
+        1: "Easy", 2: "Controlled", 3: "Working", 4: "Hard", 5: "Unusual"
+    }, form_attr)}</label>
+    <label>Energy{session_rating_select("energy_level", values.get("energy_level"), {
+        1: "Empty", 2: "Low", 3: "Normal", 4: "Good", 5: "Excellent"
+    }, form_attr)}</label>
+    <label>Sleep{session_rating_select("sleep_quality", values.get("sleep_quality"), {
+        1: "Poor", 2: "Light", 3: "OK", 4: "Good", 5: "Excellent"
+    }, form_attr)}</label>
+    <label>Hydration{ternary_select("hydration_ok", values.get("hydration_ok"), form_attr, "Normal", "Off")}</label>
+    <label>Food{ternary_select("food_ok", values.get("food_ok"), form_attr, "Normal", "Off")}</label>
+    <label><span>Heat affected</span><input name="heat_flag" type="checkbox" value="1"{form_attr}{checked_attr(values.get("heat_flag"))}></label>
+    <label><span>Hit wall</span><input name="hit_wall" type="checkbox" value="1"{form_attr}{checked_attr(values.get("hit_wall"))}></label>
+"""
+    if not wrap:
+        return f'<div class="stack">{controls}</div>'
+    return f"""
+<details>
+  <summary>Session feel</summary>
+  <div class="stack">{controls}</div>
+</details>"""
+
+
+def session_rating_select(name: str, current: object, labels: dict[int, str], form_attr: str = "") -> str:
+    current_text = "" if current in (None, "") else str(int(float(current)))
+    options = ['<option value="">Not recorded</option>']
+    for value, label in labels.items():
+        selected = " selected" if str(value) == current_text else ""
+        options.append(f'<option value="{value}"{selected}>{value} - {escape(label)}</option>')
+    return f'<select name="{escape(name)}"{form_attr}>{"".join(options)}</select>'
+
+
+def rating_labels(maximum: int) -> dict[int, str]:
+    return {value: str(value) for value in range(1, maximum + 1)}
+
+
+def ternary_select(name: str, current: object, form_attr: str, yes_label: str, no_label: str) -> str:
+    current_text = "" if current in (None, "") else str(int(float(current)))
+    options = [
+        ('', "Not recorded"),
+        ("1", yes_label),
+        ("0", no_label),
+    ]
+    rendered = []
+    for value, label in options:
+        selected = " selected" if value == current_text else ""
+        rendered.append(f'<option value="{value}"{selected}>{escape(label)}</option>')
+    return f'<select name="{escape(name)}"{form_attr}>{"".join(rendered)}</select>'
+
+
+def checked_attr(value: object) -> str:
+    return " checked" if value in (1, "1", True, "true", "on") else ""
+
+
+def entry_feel_controls(form_id: str, entry: object) -> str:
+    values = {
+        "rpe": getattr(entry, "rpe", None),
+        "leg_fatigue": getattr(entry, "leg_fatigue", None),
+        "breathing_strain": getattr(entry, "breathing_strain", None),
+        "energy_level": getattr(entry, "energy_level", None),
+        "sleep_quality": getattr(entry, "sleep_quality", None),
+        "heat_flag": getattr(entry, "heat_flag", None),
+        "hydration_ok": getattr(entry, "hydration_ok", None),
+        "food_ok": getattr(entry, "food_ok", None),
+        "hit_wall": getattr(entry, "hit_wall", None),
+    }
+    summary = session_feel_summary(values) or "Add feel"
+    return f"<details><summary>{escape(summary)}</summary>{session_feel_form_fields(values, form_id=form_id, wrap=False)}</details>"
+
+
+def session_feel_summary(values: dict[str, object]) -> str:
+    pieces = []
+    if values.get("rpe") not in (None, ""):
+        pieces.append(f"RPE {values['rpe']}")
+    if values.get("leg_fatigue") not in (None, ""):
+        pieces.append(f"Legs {values['leg_fatigue']}")
+    if values.get("breathing_strain") not in (None, ""):
+        pieces.append(f"Breathing {values['breathing_strain']}")
+    if values.get("hit_wall") in (1, "1", True):
+        pieces.append("wall")
+    if values.get("heat_flag") in (1, "1", True):
+        pieces.append("heat")
+    return ", ".join(pieces)
+
+
 def render_sprint_entries_table(sprints: list[object]) -> str:
     forms: list[str] = []
     rows: list[tuple[object, list[str], str]] = []
@@ -999,6 +1561,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
                     ),
                     readonly_cell(fmt_num(sprint.calibrated_distance, 2)),
                     readonly_cell(fmt_num(sprint.calories_mets, 1)),
+                    entry_feel_controls(form_id, sprint),
                     save_button(form_id),
                 ],
                 f"sprint-{sprint.id}",
@@ -1018,6 +1581,7 @@ def render_sprint_entries_table(sprints: list[object]) -> str:
             "Device distance",
             "Normalised distance",
             "Calories (HR/MET)",
+            "Feel",
             "",
         ],
         rows,
@@ -1045,13 +1609,14 @@ def render_lap_entries_table(laps: list[object], circuits: list[dict[str, object
                     entry_select(form_id, "resistance", resistance_select_options(entry_resistance_value(lap.resistance))),
                     entry_input(form_id, "rpm", fmt_raw(lap.rpm), input_type="number", step="0.1", min_value="0"),
                     readonly_cell(fmt_num(lap.calories_mets, 1)),
+                    entry_feel_controls(form_id, lap),
                     save_button(form_id),
                 ],
                 f"lap-{lap.id}",
             )
         )
     return "".join(forms) + grouped_html_table(
-        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories (HR/MET)", ""],
+        ["Date", "Start", "Lap", "Circuit", "Lap time", "Length", "Avg speed", "HR", "Resistance", "RPM", "Calories (HR/MET)", "Feel", ""],
         rows,
     )
 
@@ -2029,7 +2594,7 @@ def render_review(conn: sqlite3.Connection) -> str:
 </section>
 <section class="band">
   <h2>Review Queue</h2>
-  {raw_activity_table(queue_rows, circuits)}
+  {raw_activity_table(queue_rows, circuits, conn=conn)}
 </section>
 <section class="band">
   <h2>Import History</h2>
@@ -2073,7 +2638,12 @@ def review_activity_rows(conn: sqlite3.Connection, *, terminal: bool) -> list[sq
     ).fetchall()
 
 
-def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], readonly: bool = False) -> str:
+def raw_activity_table(
+    rows: list[sqlite3.Row],
+    circuits: list[sqlite3.Row],
+    readonly: bool = False,
+    conn: sqlite3.Connection | None = None,
+) -> str:
     if not rows:
         return '<div class="empty">No raw activities in this section.</div>'
     circuit_options = '<option value="">No circuit</option>' + "".join(
@@ -2092,13 +2662,23 @@ def raw_activity_table(rows: list[sqlite3.Row], circuits: list[sqlite3.Row], rea
   <td>{fmt_num(row['raw_distance'], 3)}<br><span class="muted">{source_metric_summary(row)}</span></td>
   <td>{review_status_label(row)}<br><span class="muted">{escape(str(row['classification_reason'] or ''))}</span></td>
   <td>{duplicate_match_label(row)}</td>
-  <td>{'' if readonly else review_actions(row, options)}</td>
+  <td>{history_actions(row) if readonly else review_actions(row, options, conn)}</td>
 </tr>""")
     return f"""
 <table>
   <thead><tr><th>Source</th><th>Title</th><th>Start</th><th>Raw distance</th><th>Status</th><th>Possible match</th><th>Review</th></tr></thead>
   <tbody>{''.join(rendered)}</tbody>
 </table>"""
+
+
+def history_actions(row: sqlite3.Row) -> str:
+    if row["review_status"] != "ignored":
+        return '<span class="muted">Handled</span>'
+    return f"""
+      <form method="post" action="/review/reopen">
+        <input type="hidden" name="id" value="{row['id']}">
+        <button class="secondary" type="submit">Reopen review</button>
+      </form>"""
 
 
 def review_status_label(row: sqlite3.Row) -> str:
@@ -2129,7 +2709,7 @@ def duplicate_match_label(row: sqlite3.Row) -> str:
     return f"{escape(' - '.join(piece for piece in pieces if piece))}<br><span class=\"muted\">{escape(str(reason))}</span>"
 
 
-def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
+def review_actions(row: sqlite3.Row, circuit_options: str, conn: sqlite3.Connection | None = None) -> str:
     confirm_duplicate = ""
     if row["duplicate_entry_type"] and row["duplicate_entry_id"]:
         confirm_duplicate = f"""
@@ -2137,34 +2717,20 @@ def review_actions(row: sqlite3.Row, circuit_options: str) -> str:
         <input type="hidden" name="id" value="{row['id']}">
         <button class="secondary" type="submit">Confirm duplicate</button>
       </form>"""
-    promote_form = promote_activity_form(row, circuit_options)
+    promote_form = promote_activity_form(row, circuit_options, conn)
     return f"""
-    <div style="display:grid; gap:8px;">
+    <div class="review-actions">
       {confirm_duplicate}
       <form method="post" action="/review/classify">
         <input type="hidden" name="id" value="{row['id']}">
         <input type="hidden" name="session_type" value="ignore">
         <button class="secondary" type="submit">Ignore activity</button>
       </form>
-      <form class="stack" method="post" action="/review/classify">
-        <input type="hidden" name="id" value="{row['id']}">
-        <label>Type
-          <select name="session_type">
-            {select_option('unknown', row['session_type'])}
-            {select_option('lap', row['session_type'])}
-            {select_option('sprint', row['session_type'])}
-            {select_option('endurance', row['session_type'])}
-            {select_option('ignore', row['session_type'])}
-          </select>
-        </label>
-        <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
-        <button type="submit">Confirm</button>
-      </form>
       {promote_form}
     </div>"""
 
 
-def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
+def promote_activity_form(row: sqlite3.Row, circuit_options: str, conn: sqlite3.Connection | None = None) -> str:
     payload = raw_payload_dict(row)
     performed_on = date_part(row["started_on"]) or ""
     duration_minutes = duration_seconds_to_minutes(row["duration_seconds"])
@@ -2174,27 +2740,123 @@ def promote_activity_form(row: sqlite3.Row, circuit_options: str) -> str:
     resistance = row_value(row, "default_resistance", 4)
     notes = default_promotion_notes(row)
     hr_note = hr_quality_note(payload)
+    entry_index = inferred_entry_index(conn, raw_type, performed_on)
+    imported_summary = review_import_summary(row, payload, duration_minutes, rpm, device_watts, entry_index)
+    missing_required = review_missing_required_inputs(row, performed_on)
+    form_id = f"promote-activity-{row['id']}"
+    dialog_id = f"prepare-import-{row['id']}"
     return f"""
-      <form class="stack" method="post" action="/review/promote">
+      <button class="secondary" type="button" data-open-import="{dialog_id}">Prepare import</button>
+      <form id="{form_id}" class="review-import-form" method="post" action="/review/promote">
         <input type="hidden" name="id" value="{row['id']}">
-        <label>Import as
-          <select name="session_type">
-            {select_option('sprint', raw_type)}
-            {select_option('lap', raw_type)}
-          </select>
-        </label>
-        <label>Date<input name="performed_on" type="date" value="{escape(performed_on)}" required></label>
-        <label>Duration min<input name="duration_minutes" type="number" step="0.001" min="0" value="{step_value(duration_minutes, 3)}"></label>
-        <label>HR<input name="hr" type="number" min="0" value="{fmt_raw(row['hr'])}" required></label>
-        {hr_note}
-        <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
-        <label>RPM<input name="rpm" type="number" step="0.1" min="0" value="{fmt_raw(rpm)}"></label>
-        <label>Device watts<input name="device_watts" type="number" step="0.1" min="0" value="{fmt_raw(device_watts)}"></label>
-        <label>Entry number<input name="entry_index" type="number" min="1"></label>
-        <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
-        <label>Notes<input name="notes" value="{escape(notes)}"></label>
-        <button type="submit">Import entry</button>
+        <button type="submit" data-import-submit disabled>Import entry</button>
+        <dialog id="{dialog_id}" class="review-dialog" data-form-id="{form_id}">
+          <div class="review-dialog-head">
+            <div>
+              <h3>Prepare Import</h3>
+              <div class="muted">{imported_summary}</div>
+            </div>
+            <button class="secondary" type="button" data-close-import>Close</button>
+          </div>
+          <div class="review-dialog-body">
+            <div class="review-dialog-section">
+              <h4>Review choices</h4>
+              <div class="stack">
+                <label>Import as
+                  <select name="session_type">
+                    {select_option('sprint', raw_type)}
+                    {select_option('lap', raw_type)}
+                  </select>
+                </label>
+                <label>Resistance<input name="resistance" type="number" min="{MIN_RESISTANCE}" max="{MAX_RESISTANCE}" value="{fmt_raw(resistance)}" required></label>
+                <label>Circuit<select name="circuit_id">{circuit_options}</select></label>
+                <label>Entry number<input name="entry_index" type="number" min="1" value="{fmt_raw(entry_index)}"></label>
+                {missing_required}
+                <label>Notes<input name="notes" value="{escape(notes)}"></label>
+              </div>
+              {hr_note}
+              {session_feel_form_fields({})}
+            </div>
+            <div class="review-dialog-section">
+              <h4>Imported values</h4>
+              {import_review_detail_panel(row, payload, duration_minutes, rpm, device_watts, entry_index, notes)}
+            </div>
+          </div>
+          <div class="dialog-actions">
+            <button class="secondary" type="button" data-close-import>Cancel</button>
+            <button type="button" data-ready-import>OK</button>
+          </div>
+        </dialog>
       </form>"""
+
+
+def review_import_summary(
+    row: sqlite3.Row,
+    payload: dict[str, object],
+    duration_minutes: float | None,
+    rpm: str,
+    device_watts: str,
+    entry_index: int | None,
+) -> str:
+    pieces = [
+        f"date {fmt_date(date_part(row['started_on']))}" if date_part(row["started_on"]) else "",
+        f"start {fmt_datetime(row['started_on'])}" if row["started_on"] else "",
+        f"time {fmt_minutes(duration_minutes)}" if duration_minutes is not None else "",
+        f"HR {fmt_num(row['hr'], 0)}" if row["hr"] not in (None, "") else "HR needed",
+        f"RPM {rpm}" if rpm else "",
+        f"device W {device_watts}" if device_watts else "",
+        f"raw distance {fmt_num(row['raw_distance'], 3)}" if row["raw_distance"] is not None else "",
+        f"next #{entry_index}" if entry_index is not None else "",
+    ]
+    hr_text = hr_quality_text(payload)
+    if hr_text:
+        pieces.append(hr_text)
+    return escape("; ".join(piece for piece in pieces if piece))
+
+
+def review_missing_required_inputs(row: sqlite3.Row, performed_on: str) -> str:
+    fields = []
+    if not performed_on:
+        fields.append('<label>Date<input name="performed_on" type="date" required></label>')
+    if row["hr"] in (None, ""):
+        fields.append('<label>HR<input name="hr" type="number" min="0" required></label>')
+    return "".join(fields)
+
+
+def import_review_detail_panel(
+    row: sqlite3.Row,
+    payload: dict[str, object],
+    duration_minutes: float | None,
+    rpm: str,
+    device_watts: str,
+    entry_index: int | None,
+    notes: str,
+) -> str:
+    items = [
+        ("Date", fmt_date(date_part(row["started_on"])) if date_part(row["started_on"]) else "Not detected"),
+        ("Start", fmt_datetime(row["started_on"]) if row["started_on"] else "Not detected"),
+        ("Duration", fmt_minutes(duration_minutes) if duration_minutes is not None else "Not detected"),
+        ("HR", fmt_num(row["hr"], 0) if row["hr"] not in (None, "") else "Not detected"),
+        ("RPM", rpm or "Not detected"),
+        ("Device watts", device_watts or "Not detected"),
+        ("Raw distance", fmt_num(row["raw_distance"], 3) if row["raw_distance"] is not None else "Not detected"),
+        ("Entry number", str(entry_index) if entry_index is not None else "Not detected"),
+        ("Notes", notes or "None"),
+    ]
+    hr_text = hr_quality_text(payload)
+    if hr_text:
+        items.append(("HR quality", hr_text))
+    cells = "".join(
+        f'<div class="readonly-item"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'
+        for label, value in items
+    )
+    return f'<div class="readonly-grid">{cells}</div>'
+
+
+def inferred_entry_index(conn: sqlite3.Connection | None, entry_type: str, performed_on: str | None) -> int | None:
+    if conn is None or not performed_on:
+        return None
+    return next_entry_index(conn, entry_type, performed_on)
 
 
 def default_promotion_notes(row: sqlite3.Row) -> str:
@@ -3532,6 +4194,12 @@ def distance_km_miles(row: dict[str, object] | None) -> str:
     return f"{fmt_num(row.get('distance_km'), 2)} km / {fmt_num(row.get('distance_miles'), 2)} mi"
 
 
+def km_to_miles(value: object) -> float:
+    if value in (None, ""):
+        return 0.0
+    return float(value) * KM_TO_MILES
+
+
 def best_laps_table(rows: list[dict[str, object]]) -> str:
     return table(
         ["Circuit", "Best time", "Date", "Length", "Average speed"],
@@ -4281,6 +4949,8 @@ def add_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             raw_distance=raw_distance,
             hr=hr,
             raw_payload=raw_payload,
+            suggestion=suggestion,
+            duplicate=duplicate,
         )
     elif duplicate and duplicate["confidence"] >= STRONG_DUPLICATE_THRESHOLD:
         backfill_duplicate_started_at(conn, duplicate, started_on)
@@ -4298,6 +4968,8 @@ def enrich_existing_raw_activity(
     raw_distance: float | None,
     hr: int | None,
     raw_payload: str | None,
+    suggestion: dict[str, object] | None = None,
+    duplicate: dict[str, object] | None = None,
 ) -> None:
     if source_activity_id is None:
         return
@@ -4317,6 +4989,27 @@ def enrich_existing_raw_activity(
         }
     if hr is None and existing_duplicate:
         hr = hr_for_duplicate(conn, existing_duplicate)
+    reopen_ignored = row["review_status"] == "ignored" and not raw_activity_has_entry(conn, row["id"])
+    if reopen_ignored and suggestion is not None:
+        session_type = str(suggestion["session_type"])
+        circuit_id = suggestion.get("circuit_id")
+        review_status = reopened_review_status(session_type, hr)
+        classification_confidence = suggestion["confidence"]
+        classification_reason = f"Reopened from repeat upload; {suggestion['reason']}"
+        duplicate_entry_type = duplicate["entry_type"] if duplicate else row["duplicate_entry_type"]
+        duplicate_entry_id = duplicate["entry_id"] if duplicate else row["duplicate_entry_id"]
+        duplicate_confidence = duplicate["confidence"] if duplicate else row["duplicate_confidence"]
+        duplicate_reason = duplicate["reason"] if duplicate else row["duplicate_reason"]
+    else:
+        session_type = row["session_type"]
+        circuit_id = row["circuit_id"]
+        review_status = row["review_status"]
+        classification_confidence = row["classification_confidence"]
+        classification_reason = row["classification_reason"]
+        duplicate_entry_type = row["duplicate_entry_type"]
+        duplicate_entry_id = row["duplicate_entry_id"]
+        duplicate_confidence = row["duplicate_confidence"]
+        duplicate_reason = row["duplicate_reason"]
     conn.execute(
         """
         UPDATE raw_activities
@@ -4325,7 +5018,16 @@ def enrich_existing_raw_activity(
             duration_seconds = ?,
             raw_distance = ?,
             hr = ?,
-            raw_payload = ?
+            raw_payload = ?,
+            review_status = ?,
+            session_type = ?,
+            circuit_id = ?,
+            classification_confidence = ?,
+            classification_reason = ?,
+            duplicate_entry_type = ?,
+            duplicate_entry_id = ?,
+            duplicate_confidence = ?,
+            duplicate_reason = ?
         WHERE id = ?
         """,
         (
@@ -4335,6 +5037,15 @@ def enrich_existing_raw_activity(
             prefer_existing(row["raw_distance"], raw_distance),
             prefer_existing(row["hr"], hr),
             merge_raw_payload(row["raw_payload"], raw_payload),
+            review_status,
+            session_type,
+            circuit_id,
+            classification_confidence,
+            classification_reason,
+            duplicate_entry_type,
+            duplicate_entry_id,
+            duplicate_confidence,
+            duplicate_reason,
             row["id"],
         ),
     )
@@ -4351,6 +5062,13 @@ def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     circuit_id = maybe_int(params.get("circuit_id")) if session_type == "lap" else None
     if session_type == "ignore":
         review_status = "ignored"
+        existing = conn.execute(
+            "SELECT session_type, circuit_id FROM raw_activities WHERE id = ?",
+            (int(params["id"]),),
+        ).fetchone()
+        if existing is not None:
+            session_type = existing["session_type"]
+            circuit_id = existing["circuit_id"]
     elif session_type in ("lap", "sprint"):
         review_status = "ready_to_import"
     else:
@@ -4368,6 +5086,35 @@ def classify_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
         (session_type, circuit_id, review_status, int(params["id"])),
     )
     conn.commit()
+
+
+def reopen_raw_activity(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    raw_id = int(required(params, "id"))
+    row = conn.execute("SELECT * FROM raw_activities WHERE id = ?", (raw_id,)).fetchone()
+    if row is None:
+        raise ValueError("Raw activity was not found.")
+    if row["review_status"] != "ignored":
+        return
+    if raw_activity_has_entry(conn, raw_id):
+        raise ValueError("Raw activity is already linked to an entry.")
+    conn.execute(
+        """
+        UPDATE raw_activities
+        SET review_status = ?,
+            classification_reason = 'Reopened from import history'
+        WHERE id = ?
+        """,
+        (reopened_review_status(row["session_type"], row["hr"]), raw_id),
+    )
+    conn.commit()
+
+
+def reopened_review_status(session_type: object, hr: object) -> str:
+    if hr in (None, ""):
+        return "needs_hr"
+    if str(session_type) in ("lap", "sprint"):
+        return "ready_to_import"
+    return "needs_review"
 
 
 def confirm_duplicate_activity(conn: sqlite3.Connection, params: dict[str, str]) -> None:
@@ -4438,7 +5185,10 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
     if rpm is None:
         rpm = maybe_float(str(payload.get("average_cadence"))) if payload.get("average_cadence") is not None else None
     entry_index = maybe_int(params.get("entry_index"))
-    notes = empty_to_none(params.get("notes"))
+    if entry_index is None:
+        entry_index = next_entry_index(conn, session_type, performed_on)
+    notes = empty_to_none(params.get("notes")) or default_promotion_notes(row)
+    feel = session_feel_values(params)
 
     if session_type == "lap":
         circuit_id = maybe_int(params.get("circuit_id")) or row["circuit_id"]
@@ -4448,9 +5198,11 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
             """
             INSERT INTO lap_entries (
                 performed_on, started_at, lap_index, circuit_id, lap_time_minutes,
-                hr, resistance, rpm, raw_activity_id, notes
+                hr, resistance, rpm, raw_activity_id, notes,
+                rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+                heat_flag, hydration_ok, food_ok, hit_wall
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 performed_on,
@@ -4463,6 +5215,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
                 rpm,
                 raw_id,
                 notes,
+                *feel,
             ),
         )
         entry_id = cursor.lastrowid
@@ -4472,9 +5225,11 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
             """
             INSERT INTO sprint_entries (
                 performed_on, started_at, sprint_index, duration_minutes,
-                rpm, device_watts, hr, resistance, device_distance, raw_activity_id, notes
+                rpm, device_watts, hr, resistance, device_distance, raw_activity_id, notes,
+                rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+                heat_flag, hydration_ok, food_ok, hit_wall
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 performed_on,
@@ -4488,6 +5243,7 @@ def promote_raw_activity(conn: sqlite3.Connection, params: dict[str, str]) -> No
                 row["raw_distance"],
                 raw_id,
                 notes,
+                *feel,
             ),
         )
         entry_id = cursor.lastrowid
@@ -4531,17 +5287,71 @@ def promotion_device_watts(params: dict[str, str], payload: dict[str, object]) -
     return maybe_float(str(average_watts)) if average_watts is not None else None
 
 
+def next_entry_index(conn: sqlite3.Connection, entry_type: str, performed_on: str) -> int:
+    if entry_type == "lap":
+        table = "lap_entries"
+        column = "lap_index"
+    else:
+        table = "sprint_entries"
+        column = "sprint_index"
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(MAX({column}), 0) + 1 AS next_index
+        FROM {table}
+        WHERE performed_on = ? AND {column} IS NOT NULL
+        """,
+        (performed_on,),
+    ).fetchone()
+    return int(row["next_index"] or 1)
+
+
+def session_feel_values(params: dict[str, object]) -> tuple[object, ...]:
+    return (
+        bounded_int(params.get("rpe"), 1, 10),
+        bounded_int(params.get("leg_fatigue"), 1, 5),
+        bounded_int(params.get("breathing_strain"), 1, 5),
+        bounded_int(params.get("energy_level"), 1, 5),
+        bounded_int(params.get("sleep_quality"), 1, 5),
+        checkbox_value(params.get("heat_flag")),
+        ternary_value(params.get("hydration_ok")),
+        ternary_value(params.get("food_ok")),
+        checkbox_value(params.get("hit_wall")),
+    )
+
+
+def bounded_int(value: object, minimum: int, maximum: int) -> int | None:
+    if value in (None, ""):
+        return None
+    number = int(float(str(value)))
+    if number < minimum or number > maximum:
+        raise ValueError(f"Value must be between {minimum} and {maximum}.")
+    return number
+
+
+def checkbox_value(value: object) -> int:
+    return 1 if value in (1, "1", True, "true", "on") else 0
+
+
+def ternary_value(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return 1 if str(value) == "1" else 0
+
+
 def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     performed_on = required(params, "performed_on")
     started_at = combine_entry_start(performed_on, params.get("started_at"))
     resistance = validated_resistance(params.get("resistance"))
+    feel = session_feel_values(params)
     conn.execute(
         """
         INSERT INTO sprint_entries (
             performed_on, started_at, day_number, sprint_index, duration_minutes,
-            rpm, device_watts, hr, resistance, device_distance, notes
+            rpm, device_watts, hr, resistance, device_distance, notes,
+            rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+            heat_flag, hydration_ok, food_ok, hit_wall
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             performed_on,
@@ -4555,6 +5365,7 @@ def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             resistance,
             maybe_float(params.get("device_distance")),
             empty_to_none(params.get("notes")),
+            *feel,
         ),
     )
     conn.commit()
@@ -4562,6 +5373,7 @@ def add_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
 
 def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     entry_id = int(required(params, "id"))
+    feel = session_feel_values(params)
     conn.execute(
         """
         UPDATE sprint_entries
@@ -4573,7 +5385,16 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
             device_watts = ?,
             hr = ?,
             resistance = ?,
-            device_distance = ?
+            device_distance = ?,
+            rpe = ?,
+            leg_fatigue = ?,
+            breathing_strain = ?,
+            energy_level = ?,
+            sleep_quality = ?,
+            heat_flag = ?,
+            hydration_ok = ?,
+            food_ok = ?,
+            hit_wall = ?
         WHERE id = ?
         """,
         (
@@ -4586,6 +5407,7 @@ def update_sprint_entry(conn: sqlite3.Connection, params: dict[str, str]) -> Non
             maybe_int(params.get("hr")),
             validated_resistance(params.get("resistance")),
             maybe_float(params.get("device_distance")),
+            *feel,
             entry_id,
         ),
     )
@@ -4599,13 +5421,16 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
     resistance = validated_resistance(params.get("resistance"))
+    feel = session_feel_values(params)
     conn.execute(
         """
         INSERT INTO lap_entries (
             performed_on, started_at, lap_index, circuit_id, lap_time_minutes,
-            hr, resistance, rpm, notes
+            hr, resistance, rpm, notes,
+            rpe, leg_fatigue, breathing_strain, energy_level, sleep_quality,
+            heat_flag, hydration_ok, food_ok, hit_wall
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             performed_on,
@@ -4617,6 +5442,7 @@ def add_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             resistance,
             maybe_float(params.get("rpm")),
             empty_to_none(params.get("notes")),
+            *feel,
         ),
     )
     conn.commit()
@@ -4627,6 +5453,7 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     circuit_id = maybe_int(params.get("circuit_id"))
     if circuit_id is None:
         raise ValueError("A circuit is required for lap entries.")
+    feel = session_feel_values(params)
     conn.execute(
         """
         UPDATE lap_entries
@@ -4637,7 +5464,16 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             lap_time_minutes = ?,
             hr = ?,
             resistance = ?,
-            rpm = ?
+            rpm = ?,
+            rpe = ?,
+            leg_fatigue = ?,
+            breathing_strain = ?,
+            energy_level = ?,
+            sleep_quality = ?,
+            heat_flag = ?,
+            hydration_ok = ?,
+            food_ok = ?,
+            hit_wall = ?
         WHERE id = ?
         """,
         (
@@ -4649,6 +5485,7 @@ def update_lap_entry(conn: sqlite3.Connection, params: dict[str, str]) -> None:
             maybe_int(params.get("hr")),
             validated_resistance(params.get("resistance")),
             maybe_float(params.get("rpm")),
+            *feel,
             entry_id,
         ),
     )
@@ -5062,6 +5899,29 @@ def add_resistance_calibration_test(conn: sqlite3.Connection, params: dict[str, 
     conn.commit()
 
 
+def add_challenge_progress(conn: sqlite3.Connection, params: dict[str, FormValue]) -> None:
+    team_miles = maybe_float(str(required(params, "team_miles")))
+    if team_miles is None or team_miles < 0:
+        raise ValueError("Team miles must be zero or greater.")
+    if team_miles > UK_COASTLINE_TOTAL_MILES:
+        raise ValueError(f"Team miles cannot exceed {fmt_num(UK_COASTLINE_TOTAL_MILES, 0)}.")
+    conn.execute(
+        """
+        INSERT INTO challenge_progress (
+            challenge_key, updated_on, team_miles, notes
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            UK_COASTLINE_CHALLENGE_KEY,
+            required(params, "updated_on"),
+            team_miles,
+            empty_to_none(params.get("notes")),
+        ),
+    )
+    conn.commit()
+
+
 def add_mass_log(conn: sqlite3.Connection, params: dict[str, str]) -> None:
     conn.execute(
         """
@@ -5316,6 +6176,10 @@ def duration_seconds_to_minutes(value: object) -> float | None:
     if value is None or value == "":
         return None
     return float(value) / 60
+
+
+def today_iso() -> str:
+    return datetime.now().date().isoformat()
 
 
 def fmt_date(value: object) -> str:

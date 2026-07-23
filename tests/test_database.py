@@ -94,6 +94,19 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("flywheel_diameter_mm", profile_columns)
         self.assertIn("started_at", sprint_columns)
         self.assertIn("started_at", lap_columns)
+        for column in (
+            "rpe",
+            "leg_fatigue",
+            "breathing_strain",
+            "energy_level",
+            "sleep_quality",
+            "heat_flag",
+            "hydration_ok",
+            "food_ok",
+            "hit_wall",
+        ):
+            self.assertIn(column, sprint_columns)
+            self.assertIn(column, lap_columns)
         self.assertIn("source_activity_id", calibration_columns)
         self.assertIn("source_file", calibration_columns)
         self.assertIn("file_sha256", calibration_columns)
@@ -103,6 +116,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         provenance = conn.execute("SELECT provenance FROM resistance_scaling WHERE resistance = 4").fetchone()[0]
         self.assertEqual(provenance, "manual")
         self.assertTrue(self._table_exists(conn, "duplicate_dismissals"))
+        self.assertTrue(self._table_exists(conn, "challenge_progress"))
         conn.close()
 
     def _columns(self, conn: sqlite3.Connection, table: str) -> set[str]:

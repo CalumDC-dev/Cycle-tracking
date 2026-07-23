@@ -21,6 +21,7 @@ BACKUP_TABLES = [
     "resistance_calibration_tests",
     "met_lookup",
     "mass_log",
+    "challenge_progress",
     "circuits",
     "raw_activities",
     "sprint_entries",
